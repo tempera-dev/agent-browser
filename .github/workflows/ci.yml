@@ -148,7 +148,10 @@ jobs:
           workspaces: cli
 
       - name: Run Rust tests
-        run: cargo test --profile ci --manifest-path cli/Cargo.toml --target ${{ matrix.target }}
+        # The dispatch-parity test intentionally launches a real local browser.
+        # Native CI and the dedicated E2E job cover it; cross-target jobs only
+        # prove the portable Rust surface and may run through emulation.
+        run: cargo test --profile ci --manifest-path cli/Cargo.toml --target ${{ matrix.target }} -- --skip native::parity_tests::test_all_documented_actions_are_handled
 
   native-e2e:
     name: Native E2E Tests

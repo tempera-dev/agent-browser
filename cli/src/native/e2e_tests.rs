@@ -2344,6 +2344,8 @@ async fn e2e_state_management() {
 #[tokio::test]
 #[ignore]
 async fn e2e_save_state_cross_domain() {
+    let (domain_a, _domain_a_server) = start_echo_server().await;
+    let (domain_b, _domain_b_server) = start_echo_server().await;
     let mut state = DaemonState::new();
 
     // Launch
@@ -2354,9 +2356,11 @@ async fn e2e_save_state_cross_domain() {
     .await;
     assert_success(&resp);
 
-    // Navigate to domain A and set cookie + localStorage
+    // Navigate to domain A and set cookie + localStorage.
+    // Two loopback ports are distinct browser origins and keep this persistence
+    // test independent of third-party DNS, TLS, and service availability.
     let resp = execute_command(
-        &json!({ "id": "2", "action": "navigate", "url": "https://httpbin.org/html" }),
+        &json!({ "id": "2", "action": "navigate", "url": format!("{domain_a}/html") }),
         &mut state,
     )
     .await;
@@ -2365,7 +2369,7 @@ async fn e2e_save_state_cross_domain() {
     let resp = execute_command(
         &json!({
             "id": "3", "action": "cookies_set",
-            "name": "domainA_cookie", "value": "from_httpbin"
+            "name": "domainA_cookie", "value": "from_domain_a"
         }),
         &mut state,
     )
@@ -2384,7 +2388,7 @@ async fn e2e_save_state_cross_domain() {
 
     // Navigate to domain B and set cookie + localStorage
     let resp = execute_command(
-        &json!({ "id": "5", "action": "navigate", "url": "https://example.com" }),
+        &json!({ "id": "5", "action": "navigate", "url": format!("{domain_b}/html") }),
         &mut state,
     )
     .await;
@@ -2393,7 +2397,7 @@ async fn e2e_save_state_cross_domain() {
     let resp = execute_command(
         &json!({
             "id": "6", "action": "cookies_set",
-            "name": "domainB_cookie", "value": "from_example"
+            "name": "domainB_cookie", "value": "from_domain_b"
         }),
         &mut state,
     )
@@ -2410,7 +2414,7 @@ async fn e2e_save_state_cross_domain() {
     .await;
     assert_success(&resp);
 
-    // Save state (currently on example.com)
+    // Save state while domain B is current.
     let tmp_state = std::env::temp_dir()
         .join("agent-browser-e2e-cross-domain-state.json")
         .to_string_lossy()
@@ -2426,43 +2430,43 @@ async fn e2e_save_state_cross_domain() {
     let saved = std::fs::read_to_string(&tmp_state).expect("State file should exist");
     let state_data: serde_json::Value = serde_json::from_str(&saved).unwrap();
 
-    // Verify BOTH domain cookies are present
+    // Verify BOTH origin cookies are present
     let cookies = state_data["cookies"].as_array().unwrap();
     let has_domain_a = cookies.iter().any(|c| c["name"] == "domainA_cookie");
     let has_domain_b = cookies.iter().any(|c| c["name"] == "domainB_cookie");
     assert!(
         has_domain_a,
-        "Should include cross-domain cookie from httpbin.org: {:?}",
+        "Should include cross-origin cookie from domain A: {:?}",
         cookies
     );
     assert!(
         has_domain_b,
-        "Should include cookie from example.com: {:?}",
+        "Should include cookie from domain B: {:?}",
         cookies
     );
 
     // Verify BOTH origins' localStorage are present
     let origins = state_data["origins"].as_array().unwrap();
     let has_origin_a = origins.iter().any(|o| {
-        o["origin"].as_str().is_some_and(|s| s.contains("httpbin"))
+        o["origin"].as_str() == Some(domain_a.as_str())
             && o["localStorage"]
                 .as_array()
                 .is_some_and(|ls| ls.iter().any(|e| e["name"] == "domainA_key"))
     });
     let has_origin_b = origins.iter().any(|o| {
-        o["origin"].as_str().is_some_and(|s| s.contains("example"))
+        o["origin"].as_str() == Some(domain_b.as_str())
             && o["localStorage"]
                 .as_array()
                 .is_some_and(|ls| ls.iter().any(|e| e["name"] == "domainB_key"))
     });
     assert!(
         has_origin_a,
-        "Should include localStorage from httpbin.org origin: {:?}",
+        "Should include localStorage from domain A: {:?}",
         origins
     );
     assert!(
         has_origin_b,
-        "Should include localStorage from example.com origin: {:?}",
+        "Should include localStorage from domain B: {:?}",
         origins
     );
 

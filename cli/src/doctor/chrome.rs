@@ -114,6 +114,7 @@ pub(super) fn check(checks: &mut Vec<Check>) {
     }
 }
 
+#[cfg(not(windows))]
 fn query_chrome_version(path: &Path) -> Option<String> {
     let output = std::process::Command::new(path)
         .arg("--version")
@@ -128,6 +129,15 @@ fn query_chrome_version(path: &Path) -> Option<String> {
     } else {
         Some(s)
     }
+}
+
+#[cfg(windows)]
+fn query_chrome_version(_path: &Path) -> Option<String> {
+    // chrome.exe is a GUI-subsystem executable on Windows. Invoking it with
+    // --version can attach to an existing browser process and never close the
+    // captured stdio pipes, which leaves `doctor` blocked in Command::output.
+    // A missing version is already represented as a valid informational result.
+    None
 }
 
 pub(super) fn puppeteer_cache_dir() -> Option<PathBuf> {

@@ -107,6 +107,166 @@ async fn eval_origin_storage(
     parse_origin_storage(&data)
 }
 
+fn parse_dom_storage_entries(result: &Value) -> Result<Vec<StorageEntry>, String> {
+    let entries = result
+        .get("entries")
+        .and_then(Value::as_array)
+        .ok_or("DOMStorage.getDOMStorageItems returned no entries")?;
+
+    entries
+        .iter()
+        .map(|entry| {
+            let pair = entry
+                .as_array()
+                .filter(|pair| pair.len() == 2)
+                .ok_or("DOMStorage entry was not a key/value pair")?;
+            let name = pair[0]
+                .as_str()
+                .ok_or("DOMStorage entry key was not a string")?
+                .to_string();
+            let value = pair[1]
+                .as_str()
+                .ok_or("DOMStorage entry value was not a string")?
+                .to_string();
+            Ok(StorageEntry { name, value })
+        })
+        .collect()
+}
+
+async fn get_dom_storage_entries(
+    client: &CdpClient,
+    session_id: &str,
+    origin: &str,
+    is_local_storage: bool,
+) -> Result<Vec<StorageEntry>, String> {
+    let result = client
+        .send_command(
+            "DOMStorage.getDOMStorageItems",
+            Some(json!({
+                "storageId": {
+                    "securityOrigin": origin,
+                    "isLocalStorage": is_local_storage
+                }
+            })),
+            Some(session_id),
+        )
+        .await?;
+    parse_dom_storage_entries(&result)
+}
+
+/// Read an origin directly from Chrome's storage partition without navigating.
+/// This avoids creating a disposable target for the common case and therefore
+/// avoids racing the daemon's target auto-attach bookkeeping.
+async fn collect_storage_via_dom_storage(
+    client: &CdpClient,
+    session_id: &str,
+    origin: &str,
+) -> Result<OriginStorage, String> {
+    client
+        .send_command_no_params("DOMStorage.enable", Some(session_id))
+        .await?;
+
+    let local_storage = get_dom_storage_entries(client, session_id, origin, true).await?;
+    // Session storage belongs to a particular page session. Chrome may reject
+    // or stall a request for an origin that is not active in that session, so
+    // preserve the reliable localStorage result and let the scratch-target
+    // fallback handle sessionStorage only when direct localStorage also fails.
+    let session_storage = match tokio::time::timeout(
+        tokio::time::Duration::from_secs(1),
+        get_dom_storage_entries(client, session_id, origin, false),
+    )
+    .await
+    {
+        Ok(Ok(entries)) => entries,
+        _ => Vec::new(),
+    };
+
+    Ok(OriginStorage {
+        origin: origin.to_string(),
+        local_storage,
+        session_storage,
+    })
+}
+
+async fn eval_expected_origin_storage(
+    client: &CdpClient,
+    session_id: &str,
+    origin_js: &str,
+    expected_origin: &str,
+) -> Option<OriginStorage> {
+    for _ in 0..5 {
+        if let Some(storage) = eval_origin_storage(client, session_id, origin_js).await {
+            if storage.origin == expected_origin {
+                return Some(storage);
+            }
+        }
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+    }
+    None
+}
+
+async fn navigate_temp_target(
+    client: &CdpClient,
+    session_id: &str,
+    target_origin: &str,
+    origin_js: &str,
+    blank_html_b64: Option<&str>,
+) -> Option<OriginStorage> {
+    let mut event_rx = client.subscribe();
+    let nav_url = format!("{}/", target_origin.trim_end_matches('/'));
+    if client
+        .send_command(
+            "Page.navigate",
+            Some(json!({ "url": nav_url })),
+            Some(session_id),
+        )
+        .await
+        .is_err()
+    {
+        return None;
+    }
+
+    let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(5);
+    let mut page_loaded = false;
+    while tokio::time::Instant::now() < deadline {
+        match tokio::time::timeout(tokio::time::Duration::from_millis(500), event_rx.recv()).await {
+            Ok(Ok(evt)) if evt.session_id.as_deref() == Some(session_id) => {
+                if evt.method == "Fetch.requestPaused" {
+                    if let (Some(body), Some(request_id)) = (
+                        blank_html_b64,
+                        evt.params.get("requestId").and_then(Value::as_str),
+                    ) {
+                        let _ = client
+                            .send_command(
+                                "Fetch.fulfillRequest",
+                                Some(json!({
+                                    "requestId": request_id,
+                                    "responseCode": 200,
+                                    "responseHeaders": [
+                                        { "name": "Content-Type", "value": "text/html" }
+                                    ],
+                                    "body": body
+                                })),
+                                Some(session_id),
+                            )
+                            .await;
+                    }
+                } else if evt.method == "Page.loadEventFired" {
+                    page_loaded = true;
+                    break;
+                }
+            }
+            Ok(Ok(_)) | Ok(Err(_)) | Err(_) => continue,
+        }
+    }
+
+    if !page_loaded {
+        return None;
+    }
+
+    eval_expected_origin_storage(client, session_id, origin_js, target_origin).await
+}
+
 /// Create a temporary CDP target, navigate it to each origin to collect localStorage,
 /// then close it. Uses Fetch interception to serve blank HTML instead of making real
 /// network requests.
@@ -130,13 +290,36 @@ async fn collect_storage_via_temp_target(
     // Ensure the target is closed even if attach or later steps fail
     let result = collect_storage_in_target(client, &target_id, origins, origin_js).await;
 
+    let mut target_events = client.subscribe();
     let _ = client
         .send_command_typed::<_, Value>(
             "Target.closeTarget",
-            &CloseTargetParams { target_id },
+            &CloseTargetParams {
+                target_id: target_id.clone(),
+            },
             None,
         )
         .await;
+
+    // Let the target-destroyed event reach all subscribers before state_save
+    // returns. Otherwise the daemon can drain the earlier attach event first
+    // and try to initialize a session Chrome has already removed.
+    let _ = tokio::time::timeout(tokio::time::Duration::from_secs(1), async {
+        loop {
+            match target_events.recv().await {
+                Ok(event)
+                    if event.method == "Target.targetDestroyed"
+                        && event.params.get("targetId").and_then(Value::as_str)
+                            == Some(target_id.as_str()) =>
+                {
+                    break;
+                }
+                Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    })
+    .await;
 
     result
 }
@@ -167,75 +350,43 @@ async fn collect_storage_in_target(
         .send_command_no_params("Runtime.enable", Some(temp_session))
         .await?;
 
-    // Blank HTML response body, pre-encoded to avoid repeated base64 work per request
+    // Blank HTML response body, pre-encoded to avoid repeated base64 work per request.
     let blank_html_b64 = base64::engine::general_purpose::STANDARD.encode("<html></html>");
-
-    let _ = client
-        .send_command(
-            "Fetch.enable",
-            Some(json!({ "patterns": [{ "urlPattern": "*" }] })),
-            Some(temp_session),
-        )
-        .await;
-
-    let mut event_rx = client.subscribe();
     let mut results = Vec::new();
 
     for target_origin in origins {
-        let nav_url = format!("{}/", target_origin.trim_end_matches('/'));
-        if client
+        let _ = client
             .send_command(
-                "Page.navigate",
-                Some(json!({ "url": nav_url })),
+                "Fetch.enable",
+                Some(json!({ "patterns": [{ "urlPattern": "*" }] })),
                 Some(temp_session),
             )
-            .await
-            .is_err()
-        {
-            continue;
+            .await;
+
+        let mut storage = navigate_temp_target(
+            client,
+            temp_session,
+            target_origin,
+            origin_js,
+            Some(&blank_html_b64),
+        )
+        .await;
+
+        // Chrome processes CDP messages in order, so the following navigation
+        // observes this disable without making state save wait on a response
+        // from an interception session that may already be unwinding.
+        let _ = client
+            .send_command_no_wait("Fetch.disable", None, Some(temp_session))
+            .await;
+
+        // The daemon's background Fetch handler can win the interception race.
+        // Retry with a normal navigation before declaring the origin unavailable.
+        if storage.is_none() {
+            storage =
+                navigate_temp_target(client, temp_session, target_origin, origin_js, None).await;
         }
 
-        // Fulfill intercepted requests with blank HTML until the page loads
-        let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(5);
-        let mut page_loaded = false;
-        while tokio::time::Instant::now() < deadline {
-            match tokio::time::timeout(tokio::time::Duration::from_secs(2), event_rx.recv()).await {
-                Ok(Ok(evt)) if evt.session_id.as_deref() == Some(temp_session) => {
-                    if evt.method == "Fetch.requestPaused" {
-                        if let Some(request_id) =
-                            evt.params.get("requestId").and_then(|v| v.as_str())
-                        {
-                            let _ = client
-                                .send_command(
-                                    "Fetch.fulfillRequest",
-                                    Some(json!({
-                                        "requestId": request_id,
-                                        "responseCode": 200,
-                                        "responseHeaders": [
-                                            { "name": "Content-Type", "value": "text/html" }
-                                        ],
-                                        "body": &blank_html_b64
-                                    })),
-                                    Some(temp_session),
-                                )
-                                .await;
-                        }
-                    } else if evt.method == "Page.loadEventFired" {
-                        page_loaded = true;
-                        break;
-                    }
-                }
-                Ok(Ok(_)) => continue,  // event for a different session
-                Ok(Err(_)) => continue, // lagged or closed — retry within deadline
-                Err(_) => break,        // outer timeout elapsed
-            }
-        }
-
-        if !page_loaded {
-            continue;
-        }
-
-        if let Some(storage) = eval_origin_storage(client, temp_session, origin_js).await {
+        if let Some(storage) = storage {
             if !storage.local_storage.is_empty() || !storage.session_storage.is_empty() {
                 results.push(storage);
             }
@@ -297,11 +448,33 @@ pub async fn save_state(
     // 2. Collect localStorage from remaining origins via a disposable temp target
     all_origins.remove(&current_origin);
     if !all_origins.is_empty() {
-        let remaining: Vec<String> = all_origins.into_iter().collect();
-        if let Ok(temp_origins) =
-            collect_storage_via_temp_target(client, &remaining, origin_js).await
-        {
-            origins.extend(temp_origins);
+        let mut remaining = Vec::new();
+        for origin in all_origins {
+            match collect_storage_via_dom_storage(client, session_id, &origin).await {
+                Ok(storage)
+                    if !storage.local_storage.is_empty() || !storage.session_storage.is_empty() =>
+                {
+                    origins.push(storage);
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    if std::env::var("AGENT_BROWSER_DEBUG").is_ok() {
+                        eprintln!(
+                            "[agent-browser] Direct storage collection failed for {}: {}",
+                            origin, error
+                        );
+                    }
+                    remaining.push(origin);
+                }
+            }
+        }
+
+        if !remaining.is_empty() {
+            if let Ok(temp_origins) =
+                collect_storage_via_temp_target(client, &remaining, origin_js).await
+            {
+                origins.extend(temp_origins);
+            }
         }
     }
 
