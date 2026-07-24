@@ -46,16 +46,19 @@ jobs:
           NPM_VERSION=$(npm view agent-browser version 2>/dev/null || echo "0.0.0")
           SANDBOX_NPM_VERSION=$(npm view @agent-browser/sandbox version 2>/dev/null || echo "0.0.0")
           EVE_NPM_VERSION=$(npm view @agent-browser/eve version 2>/dev/null || echo "0.0.0")
+          PUBLISHED_LOCAL_VERSION=$(npm view "agent-browser@$LOCAL_VERSION" version 2>/dev/null || true)
+          PUBLISHED_SANDBOX_VERSION=$(npm view "@agent-browser/sandbox@$SANDBOX_VERSION" version 2>/dev/null || true)
+          PUBLISHED_EVE_VERSION=$(npm view "@agent-browser/eve@$EVE_VERSION" version 2>/dev/null || true)
           echo "npm version: $NPM_VERSION"
           echo "@agent-browser/sandbox npm version: $SANDBOX_NPM_VERSION"
           echo "@agent-browser/eve npm version: $EVE_NPM_VERSION"
 
-          if [ "$LOCAL_VERSION" != "$NPM_VERSION" ]; then
-            echo "Version changed: $NPM_VERSION -> $LOCAL_VERSION"
+          if [ "$PUBLISHED_LOCAL_VERSION" != "$LOCAL_VERSION" ]; then
+            echo "Version $LOCAL_VERSION is not published to npm"
             echo "should_release=true" >> "$GITHUB_OUTPUT"
             echo "needs_github_release=true" >> "$GITHUB_OUTPUT"
           else
-            echo "Version unchanged on npm, skipping build and publish"
+            echo "Version $LOCAL_VERSION already exists on npm, skipping publish"
             echo "should_release=false" >> "$GITHUB_OUTPUT"
 
             # Check if GitHub release exists; it may be missing if a prior run
@@ -69,18 +72,18 @@ jobs:
               echo "needs_github_release=true" >> "$GITHUB_OUTPUT"
             fi
           fi
-          if [ "$SANDBOX_VERSION" != "$SANDBOX_NPM_VERSION" ]; then
-            echo "Sandbox package version changed: $SANDBOX_NPM_VERSION -> $SANDBOX_VERSION"
+          if [ "$PUBLISHED_SANDBOX_VERSION" != "$SANDBOX_VERSION" ]; then
+            echo "Sandbox package version $SANDBOX_VERSION is not published to npm"
             echo "should_publish_sandbox=true" >> "$GITHUB_OUTPUT"
           else
-            echo "Sandbox package version unchanged on npm, skipping publish"
+            echo "Sandbox package version $SANDBOX_VERSION already exists on npm, skipping publish"
             echo "should_publish_sandbox=false" >> "$GITHUB_OUTPUT"
           fi
-          if [ "$EVE_VERSION" != "$EVE_NPM_VERSION" ]; then
-            echo "Eve package version changed: $EVE_NPM_VERSION -> $EVE_VERSION"
+          if [ "$PUBLISHED_EVE_VERSION" != "$EVE_VERSION" ]; then
+            echo "Eve package version $EVE_VERSION is not published to npm"
             echo "should_publish_eve=true" >> "$GITHUB_OUTPUT"
           else
-            echo "Eve package version unchanged on npm, skipping publish"
+            echo "Eve package version $EVE_VERSION already exists on npm, skipping publish"
             echo "should_publish_eve=false" >> "$GITHUB_OUTPUT"
           fi
           echo "version=$LOCAL_VERSION" >> "$GITHUB_OUTPUT"
