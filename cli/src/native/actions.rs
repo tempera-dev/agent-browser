@@ -1621,6 +1621,36 @@ impl DaemonState {
             new_targets.retain(|te| !attached_page_target_ids.contains(&te.target_info.target_id));
         }
 
+        // A disposable target can be created, attached, and destroyed between
+        // command drains. Do not register its already-detached session as a
+        // live page after processing the matching destruction event.
+        if !destroyed_targets.is_empty() {
+            let destroyed_target_ids: HashSet<&str> =
+                destroyed_targets.iter().map(String::as_str).collect();
+            new_targets
+                .retain(|te| !destroyed_target_ids.contains(te.target_info.target_id.as_str()));
+            changed_targets
+                .retain(|te| !destroyed_target_ids.contains(te.target_info.target_id.as_str()));
+            attached_page_sessions.retain(|(target_info, _)| {
+                !destroyed_target_ids.contains(target_info.target_id.as_str())
+            });
+        }
+
+        if !detached_iframe_sessions.is_empty() {
+            let detached_session_ids: HashSet<&str> = detached_iframe_sessions
+                .iter()
+                .map(String::as_str)
+                .collect();
+            attached_page_sessions
+                .retain(|(_, session_id)| !detached_session_ids.contains(session_id.as_str()));
+            attached_iframe_sessions
+                .retain(|(_, session_id)| !detached_session_ids.contains(session_id.as_str()));
+            attached_worker_sessions
+                .retain(|(_, session_id)| !detached_session_ids.contains(session_id.as_str()));
+            attached_other_sessions
+                .retain(|session_id| !detached_session_ids.contains(session_id.as_str()));
+        }
+
         DrainedEvents {
             pending_acks,
             new_targets,
