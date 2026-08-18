@@ -1,8 +1,6 @@
 //! Persistent JSONL control channel for an established agent-browser daemon.
 
-use agent_browser::fast_transport::{
-    ChannelPool, FailureStage, SessionKey, MAX_REQUEST_BYTES,
-};
+use agent_browser::fast_transport::{ChannelPool, FailureStage, SessionKey, MAX_REQUEST_BYTES};
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
 use std::io::{self, BufRead, Write};
@@ -214,10 +212,7 @@ fn read_bounded_line(reader: &mut impl BufRead) -> io::Result<Option<Vec<u8>>> {
         if output.len().saturating_add(take) > MAX_REQUEST_BYTES {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                format!(
-                    "request exceeded {} MiB",
-                    MAX_REQUEST_BYTES / (1024 * 1024)
-                ),
+                format!("request exceeded {} MiB", MAX_REQUEST_BYTES / (1024 * 1024)),
             ));
         }
         output.extend_from_slice(&buffer[..take]);
