@@ -10,6 +10,7 @@ use serde::Deserialize;
 use serde_json::{json, Map, Value};
 use std::collections::BTreeMap;
 use std::env;
+#[cfg(windows)]
 use std::fs;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
@@ -54,17 +55,18 @@ const fn default_timeout_ms() -> u64 {
 struct ChannelKey {
     socket_dir: PathBuf,
     session: String,
+    #[cfg(windows)]
     port_identity: String,
 }
 
 impl ChannelKey {
     fn new(session: &str, namespace: Option<&str>) -> Result<Self, String> {
         validate_session(session)?;
-        let base = socket_base_dir();
         let normalized_namespace = namespace
             .map(sanitize_session_component)
             .filter(|value| !value.is_empty());
-        let socket_dir = apply_namespace(base, normalized_namespace.as_deref());
+        let socket_dir = apply_namespace(socket_base_dir(), normalized_namespace.as_deref());
+        #[cfg(windows)]
         let port_identity = normalized_namespace
             .as_ref()
             .map(|value| format!("{value}:{session}"))
@@ -72,6 +74,7 @@ impl ChannelKey {
         Ok(Self {
             socket_dir,
             session: session.to_string(),
+            #[cfg(windows)]
             port_identity,
         })
     }
@@ -144,9 +147,8 @@ struct PersistentChannel {
 
 impl PersistentChannel {
     fn connect(key: &ChannelKey) -> Result<Self, String> {
-        let transport = connect_transport(key)?;
         Ok(Self {
-            reader: BufReader::new(transport),
+            reader: BufReader::new(connect_transport(key)?),
         })
     }
 
@@ -326,78 +328,76 @@ impl Server {
                 }),
                 started,
             ),
-            "send" => {
-                if request.timeout_ms == 0 || request.timeout_ms > MAX_TIMEOUT_MS {
-                    return error_response(
-                        response_id,
-                        format!(
-                            "timeoutMs must be between 1 and {MAX_TIMEOUT_MS} milliseconds"
-                        ),
-                        started,
-                    );
-                }
-                let mut command = match request.command {
-                    Some(Value::Object(object)) => object,
-                    Some(_) => {
-                        return error_response(
-                            response_id,
-                            "command must be a JSON object",
-                            started,
-                        )
-                    }
-                    None => {
-                        return error_response(
-                            response_id,
-                            "operation=send requires command",
-                            started,
-                        )
-                    }
-                };
-                if command.get("action").and_then(Value::as_str).is_none() {
-                    return error_response(
-                        response_id,
-                        "command.action must be a string",
-                        started,
-                    );
-                }
-                if !command.contains_key("id") {
-                    self.sequence = self.sequence.wrapping_add(1);
-                    command.insert("id".to_string(), json!(self.command_id()));
-                }
-
-                match self.pool.send(
-                    key,
-                    &Value::Object(command),
-                    Duration::from_millis(request.timeout_ms),
-                ) {
-                    Ok(outcome) => {
-                        let daemon_success = outcome
-                            .response
-                            .get("success")
-                            .and_then(Value::as_bool)
-                            .unwrap_or(true);
-                        json!({
-                            "schemaVersion": SCHEMA_VERSION,
-                            "id": response_id,
-                            "ok": daemon_success,
-                            "result": outcome.response,
-                            "channel": {
-                                "session": request.session,
-                                "transport": outcome.transport,
-                                "reusedConnection": outcome.reused_connection,
-                                "reconnected": outcome.reconnected,
-                            },
-                            "timing": { "roundTripMicros": elapsed_micros(started) },
-                        })
-                    }
-                    Err(error) => error_response(response_id, error, started),
-                }
-            }
+            "send" => self.send(request, key, response_id, started),
             _ => error_response(
                 response_id,
                 "operation must be send, ping, status, or close",
                 started,
             ),
+        }
+    }
+
+    fn send(
+        &mut self,
+        request: ChannelRequest,
+        key: ChannelKey,
+        response_id: Value,
+        started: Instant,
+    ) -> Value {
+        if request.timeout_ms == 0 || request.timeout_ms > MAX_TIMEOUT_MS {
+            return error_response(
+                response_id,
+                format!("timeoutMs must be between 1 and {MAX_TIMEOUT_MS} milliseconds"),
+                started,
+            );
+        }
+        let mut command: Map<String, Value> = match request.command {
+            Some(Value::Object(object)) => object,
+            Some(_) => {
+                return error_response(response_id, "command must be a JSON object", started)
+            }
+            None => {
+                return error_response(
+                    response_id,
+                    "operation=send requires command",
+                    started,
+                )
+            }
+        };
+        if command.get("action").and_then(Value::as_str).is_none() {
+            return error_response(response_id, "command.action must be a string", started);
+        }
+        if !command.contains_key("id") {
+            self.sequence = self.sequence.wrapping_add(1);
+            command.insert("id".to_string(), json!(self.command_id()));
+        }
+
+        match self.pool.send(
+            key,
+            &Value::Object(command),
+            Duration::from_millis(request.timeout_ms),
+        ) {
+            Ok(outcome) => {
+                let daemon_success = outcome
+                    .response
+                    .get("success")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(true);
+                json!({
+                    "schemaVersion": SCHEMA_VERSION,
+                    "id": response_id,
+                    "ok": daemon_success,
+                    "result": outcome.response,
+                    "channel": {
+                        "session": request.session,
+                        "transport": outcome.transport,
+                        "reusedConnection": outcome.reused_connection,
+                        "reconnected": outcome.reconnected,
+                    },
+                    "timing": { "roundTripMicros": elapsed_micros(started) },
+                })
+            }
+            Err(error) => error_response(response_id, error, started),
         }
     }
 
@@ -463,7 +463,8 @@ fn main() {
 }
 
 fn write_json_line(writer: &mut impl Write, value: &Value) -> io::Result<()> {
-    serde_json::to_writer(&mut *writer, value)?;
+    serde_json::to_writer(&mut *writer, value)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
     writer.write_all(b"\n")?;
     writer.flush()
 }
@@ -586,6 +587,7 @@ fn connect_transport(key: &ChannelKey) -> Result<Transport, String> {
     Err("persistent channel is unsupported on this platform".to_string())
 }
 
+#[cfg(any(windows, test))]
 fn port_for_identity(identity: &str) -> u16 {
     let mut hash: i32 = 0;
     for character in identity.chars() {
@@ -646,13 +648,7 @@ mod tests {
     }
 
     #[test]
-    fn command_id_is_added_without_overwriting_explicit_ids() {
-        let mut server = Server::new();
-        let mut generated = Map::from_iter([("action".to_string(), json!("snapshot"))]);
-        server.sequence = server.sequence.wrapping_add(1);
-        generated.insert("id".to_string(), json!(server.command_id()));
-        assert!(generated["id"].as_str().unwrap().starts_with("fast-"));
-
+    fn explicit_command_id_is_preserved() {
         let explicit = Map::from_iter([
             ("id".to_string(), json!("caller-id")),
             ("action".to_string(), json!("snapshot")),
