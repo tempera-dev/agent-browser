@@ -1,0 +1,39 @@
+name: browser fast path
+
+on:
+  pull_request:
+    paths:
+      - "fast-path/**"
+      - "docs/PERFORMANCE_V2.md"
+      - ".github/workflows/fast-path.yml"
+  push:
+    branches:
+      - agent/runtime-speed-v2
+    paths:
+      - "fast-path/**"
+      - "docs/PERFORMANCE_V2.md"
+      - ".github/workflows/fast-path.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Format
+        run: cargo fmt --manifest-path fast-path/Cargo.toml --check
+      - name: Test
+        run: cargo test --manifest-path fast-path/Cargo.toml --locked
+      - name: Clippy
+        run: cargo clippy --manifest-path fast-path/Cargo.toml --all-targets --locked -- -D warnings
+      - name: Release build
+        run: cargo build --manifest-path fast-path/Cargo.toml --release --locked
