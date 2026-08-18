@@ -126,12 +126,8 @@ impl Server {
     }
 
     fn handle(&mut self, request: Value) -> Option<Value> {
-        let id = request.get("id").cloned();
+        let id = request.get("id").cloned()?;
         let method = request.get("method").and_then(Value::as_str)?;
-        if id.is_none() {
-            return None;
-        }
-        let id = id.unwrap_or(Value::Null);
         match method {
             "initialize" => Some(rpc_result(id, initialize_result(&request))),
             "ping" => Some(rpc_result(id, json!({}))),
