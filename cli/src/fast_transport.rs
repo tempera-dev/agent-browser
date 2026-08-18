@@ -185,9 +185,7 @@ impl Channel {
             .get_ref()
             .set_timeouts(timeout)
             .map_err(|error| {
-                ChannelFailure::before_send(format!(
-                    "failed to configure daemon channel: {error}"
-                ))
+                ChannelFailure::before_send(format!("failed to configure daemon channel: {error}"))
             })?;
         let mut payload = serde_json::to_vec(command).map_err(|error| {
             ChannelFailure::before_send(format!("failed to encode daemon command: {error}"))
@@ -219,9 +217,7 @@ impl Channel {
             .take((MAX_RESPONSE_BYTES + 1) as u64)
             .read_until(b'\n', &mut response)
             .map_err(|error| {
-                ChannelFailure::delivery_unknown(format!(
-                    "failed to read daemon response: {error}"
-                ))
+                ChannelFailure::delivery_unknown(format!("failed to read daemon response: {error}"))
             })?;
         if bytes == 0 {
             return Err(ChannelFailure::delivery_unknown(
@@ -238,9 +234,7 @@ impl Channel {
             response.pop();
         }
         serde_json::from_slice(&response).map_err(|error| {
-            ChannelFailure::delivery_unknown(format!(
-                "daemon returned invalid JSON: {error}"
-            ))
+            ChannelFailure::delivery_unknown(format!("daemon returned invalid JSON: {error}"))
         })
     }
 }
