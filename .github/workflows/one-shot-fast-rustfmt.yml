@@ -1,0 +1,50 @@
+name: one-shot fast Rustfmt
+
+on:
+  push:
+    branches:
+      - agent/fast-control-channel
+
+permissions:
+  contents: write
+
+concurrency:
+  group: one-shot-fast-rustfmt
+  cancel-in-progress: false
+
+jobs:
+  format:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout branch
+        uses: actions/checkout@v4
+        with:
+          ref: agent/fast-control-channel
+
+      - name: Setup Rustfmt
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: Format Rust sources
+        run: cargo fmt --manifest-path cli/Cargo.toml
+
+      - name: Commit formatter output
+        shell: bash
+        run: |
+          set -euo pipefail
+          git add \
+            cli/src/bin/agent-browser-fast-channel.rs \
+            cli/src/bin/agent-browser-fast-mcp.rs \
+            cli/src/fast_transport.rs \
+            cli/src/lib.rs
+          if git diff --cached --quiet; then
+            echo "Rust sources already formatted"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "style: format fast browser runtime"
+          git push origin HEAD:agent/fast-control-channel
