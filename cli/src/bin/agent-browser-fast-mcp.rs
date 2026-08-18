@@ -137,7 +137,7 @@ impl Server {
             "ping" => Some(rpc_result(id, json!({}))),
             "tools/list" => Some(rpc_result(id, json!({"tools": tool_specs()}))),
             "tools/call" => Some(self.call_tool(id, request.get("params"))),
-            "resources/list" | "prompts/list" => Some(rpc_result(id, json!({})) ),
+            "resources/list" | "prompts/list" => Some(rpc_result(id, json!({}))),
             _ => Some(rpc_error(id, -32601, format!("Method not found: {method}"))),
         }
     }
@@ -177,8 +177,8 @@ impl Server {
     }
 
     fn status(&self, arguments: &Map<String, Value>) -> Result<Value, String> {
-        let session = optional_string(arguments, "session")
-            .unwrap_or_else(|| self.config.session.clone());
+        let session =
+            optional_string(arguments, "session").unwrap_or_else(|| self.config.session.clone());
         let key = SessionKey::new(&session, self.config.namespace.as_deref())
             .map_err(|error| error.to_string())?;
         Ok(json!({
@@ -249,20 +249,14 @@ impl Server {
         }
     }
 
-    fn build(
-        &self,
-        name: &str,
-        arguments: &Map<String, Value>,
-    ) -> Result<BuiltCommand, String> {
-        let session = optional_string(arguments, "session")
-            .unwrap_or_else(|| self.config.session.clone());
+    fn build(&self, name: &str, arguments: &Map<String, Value>) -> Result<BuiltCommand, String> {
+        let session =
+            optional_string(arguments, "session").unwrap_or_else(|| self.config.session.clone());
         SessionKey::new(&session, self.config.namespace.as_deref())
             .map_err(|error| error.to_string())?;
         let timeout_ms = optional_u64(arguments, "timeoutMs").unwrap_or(self.config.timeout_ms);
         if !(1..=MAX_TIMEOUT_MS).contains(&timeout_ms) {
-            return Err(format!(
-                "timeoutMs must be between 1 and {MAX_TIMEOUT_MS}"
-            ));
+            return Err(format!("timeoutMs must be between 1 and {MAX_TIMEOUT_MS}"));
         }
 
         let (command, cli_args, bootstrap_safe) = match name {
@@ -276,19 +270,13 @@ impl Server {
                 )
             }
             "agent_browser_back" => (json!({"action": "back"}), vec!["back".into()], true),
-            "agent_browser_forward" => {
-                (json!({"action": "forward"}), vec!["forward".into()], true)
-            }
-            "agent_browser_reload" => {
-                (json!({"action": "reload"}), vec!["reload".into()], true)
-            }
+            "agent_browser_forward" => (json!({"action": "forward"}), vec!["forward".into()], true),
+            "agent_browser_reload" => (json!({"action": "reload"}), vec!["reload".into()], true),
             "agent_browser_snapshot" => {
                 (json!({"action": "snapshot"}), vec!["snapshot".into()], true)
             }
             "agent_browser_click" => selector_command(arguments, "click", "click", true)?,
-            "agent_browser_dblclick" => {
-                selector_command(arguments, "dblclick", "dblclick", true)?
-            }
+            "agent_browser_dblclick" => selector_command(arguments, "dblclick", "dblclick", true)?,
             "agent_browser_fill" => {
                 let selector = bounded_string(arguments, "selector", MAX_SELECTOR_BYTES)?;
                 let value = bounded_string(arguments, "value", MAX_TEXT_BYTES)?;
@@ -329,9 +317,7 @@ impl Server {
             "agent_browser_hover" => selector_command(arguments, "hover", "hover", true)?,
             "agent_browser_focus" => selector_command(arguments, "focus", "focus", true)?,
             "agent_browser_check" => selector_command(arguments, "check", "check", true)?,
-            "agent_browser_uncheck" => {
-                selector_command(arguments, "uncheck", "uncheck", true)?
-            }
+            "agent_browser_uncheck" => selector_command(arguments, "uncheck", "uncheck", true)?,
             "agent_browser_select" => {
                 let selector = bounded_string(arguments, "selector", MAX_SELECTOR_BYTES)?;
                 let values = string_or_string_array(arguments, "values", MAX_TEXT_BYTES)?;
@@ -349,7 +335,8 @@ impl Server {
                 )
             }
             "agent_browser_scroll" => {
-                let direction = optional_string(arguments, "direction").unwrap_or_else(|| "down".into());
+                let direction =
+                    optional_string(arguments, "direction").unwrap_or_else(|| "down".into());
                 if !matches!(direction.as_str(), "up" | "down" | "left" | "right") {
                     return Err("direction must be up, down, left, or right".to_string());
                 }
@@ -373,17 +360,17 @@ impl Server {
                 }
                 (command, cli, true)
             }
-            "agent_browser_get_url" => {
-                (json!({"action": "get_url"}), vec!["get".into(), "url".into()], true)
-            }
+            "agent_browser_get_url" => (
+                json!({"action": "get_url"}),
+                vec!["get".into(), "url".into()],
+                true,
+            ),
             "agent_browser_get_title" => (
                 json!({"action": "get_title"}),
                 vec!["get".into(), "title".into()],
                 true,
             ),
-            "agent_browser_close" => {
-                (json!({"action": "close"}), vec!["close".into()], true)
-            }
+            "agent_browser_close" => (json!({"action": "close"}), vec!["close".into()], true),
             _ => return Err(format!("unknown fast MCP tool: {name}")),
         };
 
@@ -475,23 +462,85 @@ fn initialize_result(request: &Value) -> Value {
 
 fn tool_specs() -> Vec<Value> {
     vec![
-        tool("agent_browser_fast_status", "Inspect the resident transport without touching the browser.", Map::new(), &[]),
-        tool("agent_browser_open", "Navigate the current browser tab.", properties(&[("url", string_schema("URL to open"))]), &["url"]),
+        tool(
+            "agent_browser_fast_status",
+            "Inspect the resident transport without touching the browser.",
+            Map::new(),
+            &[],
+        ),
+        tool(
+            "agent_browser_open",
+            "Navigate the current browser tab.",
+            properties(&[("url", string_schema("URL to open"))]),
+            &["url"],
+        ),
         no_arg_tool("agent_browser_back", "Navigate back."),
         no_arg_tool("agent_browser_forward", "Navigate forward."),
         no_arg_tool("agent_browser_reload", "Reload the current page."),
-        no_arg_tool("agent_browser_snapshot", "Capture the current semantic browser snapshot."),
+        no_arg_tool(
+            "agent_browser_snapshot",
+            "Capture the current semantic browser snapshot.",
+        ),
         selector_tool("agent_browser_click", "Click a semantic selector or @ref."),
-        selector_tool("agent_browser_dblclick", "Double-click a semantic selector or @ref."),
-        tool("agent_browser_fill", "Clear and fill a field.", properties(&[("selector", string_schema("Selector or @ref")), ("value", string_schema("Value to fill"))]), &["selector", "value"]),
-        tool("agent_browser_type", "Type into a field without exposing text in a child-process argv.", properties(&[("selector", string_schema("Selector or @ref")), ("text", string_schema("Text to type")), ("clear", json!({"type":"boolean"})), ("delayMs", integer_schema(0, 60_000))]), &["selector", "text"]),
-        tool("agent_browser_press", "Press a keyboard key.", properties(&[("key", string_schema("Playwright-style key name"))]), &["key"]),
+        selector_tool(
+            "agent_browser_dblclick",
+            "Double-click a semantic selector or @ref.",
+        ),
+        tool(
+            "agent_browser_fill",
+            "Clear and fill a field.",
+            properties(&[
+                ("selector", string_schema("Selector or @ref")),
+                ("value", string_schema("Value to fill")),
+            ]),
+            &["selector", "value"],
+        ),
+        tool(
+            "agent_browser_type",
+            "Type into a field without exposing text in a child-process argv.",
+            properties(&[
+                ("selector", string_schema("Selector or @ref")),
+                ("text", string_schema("Text to type")),
+                ("clear", json!({"type":"boolean"})),
+                ("delayMs", integer_schema(0, 60_000)),
+            ]),
+            &["selector", "text"],
+        ),
+        tool(
+            "agent_browser_press",
+            "Press a keyboard key.",
+            properties(&[("key", string_schema("Playwright-style key name"))]),
+            &["key"],
+        ),
         selector_tool("agent_browser_hover", "Hover a semantic selector or @ref."),
         selector_tool("agent_browser_focus", "Focus a semantic selector or @ref."),
         selector_tool("agent_browser_check", "Check a checkbox or radio control."),
         selector_tool("agent_browser_uncheck", "Uncheck a checkbox."),
-        tool("agent_browser_select", "Select one or more option values.", properties(&[("selector", string_schema("Selector or @ref")), ("values", json!({"oneOf":[{"type":"string"},{"type":"array","items":{"type":"string"},"minItems":1}]}))]), &["selector", "values"]),
-        tool("agent_browser_scroll", "Scroll the page or a semantic container.", properties(&[("direction", json!({"type":"string","enum":["up","down","left","right"],"default":"down"})), ("amount", integer_schema(-100_000, 100_000)), ("selector", string_schema("Optional selector or @ref"))]), &[]),
+        tool(
+            "agent_browser_select",
+            "Select one or more option values.",
+            properties(&[
+                ("selector", string_schema("Selector or @ref")),
+                (
+                    "values",
+                    json!({"oneOf":[{"type":"string"},{"type":"array","items":{"type":"string"},"minItems":1}]}),
+                ),
+            ]),
+            &["selector", "values"],
+        ),
+        tool(
+            "agent_browser_scroll",
+            "Scroll the page or a semantic container.",
+            properties(&[
+                (
+                    "direction",
+                    json!({"type":"string","enum":["up","down","left","right"],"default":"down"}),
+                ),
+                ("amount", integer_schema(-100_000, 100_000)),
+                ("selector", string_schema("Optional selector or @ref")),
+            ]),
+            &[],
+        ),
         no_arg_tool("agent_browser_get_url", "Read the current page URL."),
         no_arg_tool("agent_browser_get_title", "Read the current page title."),
         no_arg_tool("agent_browser_close", "Close the current browser session."),
@@ -508,10 +557,7 @@ fn tool(
         "session".into(),
         string_schema("Optional validated session override"),
     );
-    properties.insert(
-        "timeoutMs".into(),
-        integer_schema(1, MAX_TIMEOUT_MS as i64),
-    );
+    properties.insert("timeoutMs".into(), integer_schema(1, MAX_TIMEOUT_MS as i64));
     json!({
         "name": name,
         "description": description,
@@ -593,7 +639,10 @@ fn validate_bounded(value: &str, key: &str, maximum: usize) -> Result<(), String
 }
 
 fn optional_string(arguments: &Map<String, Value>, key: &str) -> Option<String> {
-    arguments.get(key).and_then(Value::as_str).map(str::to_string)
+    arguments
+        .get(key)
+        .and_then(Value::as_str)
+        .map(str::to_string)
 }
 
 fn optional_u64(arguments: &Map<String, Value>, key: &str) -> Option<u64> {
@@ -886,10 +935,7 @@ mod tests {
         let fill = server
             .build(
                 "agent_browser_fill",
-                &properties(&[
-                    ("selector", json!("@e1")),
-                    ("value", json!("secret")),
-                ]),
+                &properties(&[("selector", json!("@e1")), ("value", json!("secret"))]),
             )
             .unwrap();
         assert!(!fill.bootstrap_safe);
