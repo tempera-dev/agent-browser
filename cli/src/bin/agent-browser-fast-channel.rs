@@ -303,7 +303,11 @@ impl Server {
                 started,
             ),
             "send" => self.send(request, key, id, started),
-            _ => error(id, "operation must be send, ping, status, or close", started),
+            _ => error(
+                id,
+                "operation must be send, ping, status, or close",
+                started,
+            ),
         }
     }
 
@@ -389,10 +393,7 @@ fn main() {
         let response = if line.len() > MAX_REQUEST_BYTES {
             error(
                 Value::Null,
-                format!(
-                    "request exceeded {} MiB",
-                    MAX_REQUEST_BYTES / (1024 * 1024)
-                ),
+                format!("request exceeded {} MiB", MAX_REQUEST_BYTES / (1024 * 1024)),
                 Instant::now(),
             )
         } else {
