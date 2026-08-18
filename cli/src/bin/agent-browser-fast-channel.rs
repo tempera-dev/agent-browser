@@ -218,31 +218,35 @@ impl Pool {
             .get_mut(&key)
             .expect("channel exists")
             .send(command, timeout);
-        if let Ok(response) = first {
-            return Ok(Outcome {
+        match first {
+            Ok(response) => Ok(Outcome {
                 response,
                 transport: self.channels.get(&key).expect("channel exists").kind(),
                 reused,
                 reconnected: false,
-            });
+            }),
+            Err(first_error) => {
+                self.channels.remove(&key);
+                let mut channel = Channel::connect(&key).map_err(|connect_error| {
+                    format!(
+                        "persistent channel failed ({first_error}); reconnect failed ({connect_error})"
+                    )
+                })?;
+                let transport = channel.kind();
+                let response = channel.send(command, timeout).map_err(|retry_error| {
+                    format!(
+                        "persistent channel failed ({first_error}); retry failed ({retry_error})"
+                    )
+                })?;
+                self.channels.insert(key, channel);
+                Ok(Outcome {
+                    response,
+                    transport,
+                    reused: false,
+                    reconnected: true,
+                })
+            }
         }
-
-        let first_error = first.expect_err("checked above");
-        self.channels.remove(&key);
-        let mut channel = Channel::connect(&key).map_err(|error| {
-            format!("persistent channel failed ({first_error}); reconnect failed ({error})")
-        })?;
-        let transport = channel.kind();
-        let response = channel.send(command, timeout).map_err(|error| {
-            format!("persistent channel failed ({first_error}); retry failed ({error})")
-        })?;
-        self.channels.insert(key, channel);
-        Ok(Outcome {
-            response,
-            transport,
-            reused: false,
-            reconnected: true,
-        })
     }
 }
 
@@ -268,7 +272,7 @@ impl Server {
             .unwrap_or_else(|| "send".to_string());
         let key = match Key::new(&request.session, request.namespace.as_deref()) {
             Ok(key) => key,
-            Err(error) => return error(id, error, started),
+            Err(message) => return error(id, message, started),
         };
 
         match operation.as_str() {
@@ -409,7 +413,7 @@ fn main() {
 
 fn write_line(writer: &mut impl Write, value: &Value) -> io::Result<()> {
     serde_json::to_writer(&mut *writer, value)
-        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+        .map_err(|encode_error| io::Error::new(io::ErrorKind::InvalidData, encode_error))?;
     writer.write_all(b"\n")?;
     writer.flush()
 }
@@ -502,14 +506,14 @@ fn connect_transport(key: &Key) -> Result<Transport, String> {
     #[cfg(unix)]
     {
         let path = key.socket_dir.join(format!("{}.sock", key.session));
-        return UnixStream::connect(&path)
+        UnixStream::connect(&path)
             .map(Transport::Unix)
             .map_err(|connect_error| {
                 format!(
                     "cannot connect to {}: {connect_error}; establish the session once with agent-browser",
                     path.display()
                 )
-            });
+            })
     }
     #[cfg(windows)]
     {
@@ -518,16 +522,14 @@ fn connect_transport(key: &Key) -> Result<Transport, String> {
             .ok()
             .and_then(|value| value.trim().parse::<u16>().ok())
             .unwrap_or_else(|| port_for_identity(&key.port_identity));
-        return TcpStream::connect(("127.0.0.1", port))
+        TcpStream::connect(("127.0.0.1", port))
             .map(Transport::Tcp)
             .map_err(|connect_error| {
                 format!(
                     "cannot connect to 127.0.0.1:{port}: {connect_error}; establish the session once with agent-browser"
                 )
-            });
+            })
     }
-    #[allow(unreachable_code)]
-    Err("persistent channel is unsupported on this platform".to_string())
 }
 
 #[cfg(any(windows, test))]
