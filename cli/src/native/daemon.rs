@@ -1,6 +1,7 @@
 use serde_json::Value;
 use std::env;
 use std::fs;
+use std::hash::{Hash, Hasher};
 use std::io::Write;
 use std::path::PathBuf;
 use std::process;
@@ -408,6 +409,9 @@ async fn handle_connection<S>(
     let (reader, mut writer) = tokio::io::split(stream);
     let mut buf_reader = BufReader::new(reader);
     let mut line = String::new();
+    // Observation identity is connection-local. Reconnects therefore force a
+    // full observation before a delta can be trusted again.
+    let mut last_observation_digest: Option<String> = None;
 
     loop {
         line.clear();
@@ -449,7 +453,7 @@ async fn handle_connection<S>(
 
                 let response = {
                     let mut s = state.lock().await;
-                    execute_command(&cmd, &mut s).await
+                    execute_connection_command(&cmd, &mut s, &mut last_observation_digest).await
                 };
 
                 let mut resp = serde_json::to_string(&response).unwrap_or_default();
@@ -473,6 +477,181 @@ async fn handle_connection<S>(
             Err(_) => break,
         }
     }
+}
+
+const NATIVE_ACT_OBSERVE_ACTION: &str = "__tempera_act_observe_v1";
+const NATIVE_SNAPSHOT_DELTA_ACTION: &str = "__tempera_snapshot_delta_v1";
+const NATIVE_FUSION_SCHEMA_V1: &str = "tempera.browser.native-fusion/v1";
+
+async fn execute_connection_command(
+    cmd: &Value,
+    state: &mut DaemonState,
+    last_observation_digest: &mut Option<String>,
+) -> Value {
+    let action = cmd
+        .get("action")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    match action {
+        NATIVE_ACT_OBSERVE_ACTION => native_act_observe(cmd, state, last_observation_digest).await,
+        NATIVE_SNAPSHOT_DELTA_ACTION => {
+            native_snapshot_delta(cmd, state, last_observation_digest).await
+        }
+        "snapshot" => {
+            let response = execute_command(cmd, state).await;
+            if response_succeeded(&response) {
+                *last_observation_digest = Some(observation_digest(&response));
+            }
+            response
+        }
+        _ => {
+            // Invalidate before any command that is not the canonical
+            // snapshot. This is deliberately conservative: no action,
+            // confirmation, navigation, or unknown command can leave a
+            // pre-command observation identity reusable.
+            *last_observation_digest = None;
+            execute_command(cmd, state).await
+        }
+    }
+}
+
+async fn native_act_observe(
+    cmd: &Value,
+    state: &mut DaemonState,
+    last_observation_digest: &mut Option<String>,
+) -> Value {
+    let Some(action_request) = cmd.get("actionRequest").filter(|value| value.is_object()) else {
+        return native_protocol_error("act-observe requires object actionRequest");
+    };
+    let Some(observe_request) = cmd.get("observeRequest").filter(|value| value.is_object()) else {
+        return native_protocol_error("act-observe requires object observeRequest");
+    };
+    if observe_request.get("action").and_then(Value::as_str) != Some("snapshot") {
+        return native_protocol_error("act-observe currently requires snapshot observation");
+    }
+    if action_request
+        .get("action")
+        .and_then(Value::as_str)
+        .is_none()
+    {
+        return native_protocol_error("act-observe actionRequest requires action");
+    }
+
+    // The outer connection handler holds the daemon state mutex once
+    // across both canonical commands. We do not duplicate action or
+    // snapshot semantics here.
+    *last_observation_digest = None;
+    let started = std::time::Instant::now();
+    let action_response = execute_command(action_request, state).await;
+    if !response_succeeded(&action_response) {
+        return serde_json::json!({
+            "success": false,
+            "error": "native fused action failed",
+            "data": {
+                "schemaVersion": NATIVE_FUSION_SCHEMA_V1,
+                "action": action_response,
+                "observation": Value::Null,
+                "nativeFused": true,
+                "elapsedMicros": started.elapsed().as_micros(),
+            }
+        });
+    }
+
+    let observation = execute_command(observe_request, state).await;
+    let observation_success = response_succeeded(&observation);
+    let digest = observation_success.then(|| observation_digest(&observation));
+    if let Some(ref digest) = digest {
+        *last_observation_digest = Some(digest.clone());
+    }
+
+    serde_json::json!({
+        "success": observation_success,
+        "error": if observation_success {
+            Value::Null
+        } else {
+            observation
+                .get("error")
+                .cloned()
+                .unwrap_or_else(|| Value::String("native fused observation failed".to_string()))
+        },
+        "data": {
+            "schemaVersion": NATIVE_FUSION_SCHEMA_V1,
+            "action": action_response,
+            "observation": observation,
+            "observationDigest": digest,
+            "nativeFused": true,
+            "elapsedMicros": started.elapsed().as_micros(),
+        }
+    })
+}
+
+async fn native_snapshot_delta(
+    cmd: &Value,
+    state: &mut DaemonState,
+    last_observation_digest: &mut Option<String>,
+) -> Value {
+    let Some(observe_request) = cmd.get("observeRequest").filter(|value| value.is_object()) else {
+        return native_protocol_error("snapshot-delta requires object observeRequest");
+    };
+    if observe_request.get("action").and_then(Value::as_str) != Some("snapshot") {
+        return native_protocol_error("snapshot-delta requires snapshot observeRequest");
+    }
+
+    let previous = cmd.get("previousDigest").and_then(Value::as_str);
+    let connection_match = previous.is_some() && previous == last_observation_digest.as_deref();
+    let observation = execute_command(observe_request, state).await;
+    if !response_succeeded(&observation) {
+        return observation;
+    }
+    let digest = observation_digest(&observation);
+    // Never emit an unchanged delta unless this connection previously
+    // issued the digest. This makes reconnects fail closed to a full
+    // observation even if a caller retained an old fingerprint.
+    let unchanged = connection_match && previous == Some(digest.as_str());
+    *last_observation_digest = Some(digest.clone());
+
+    serde_json::json!({
+        "success": true,
+        "data": {
+            "schemaVersion": NATIVE_FUSION_SCHEMA_V1,
+            "unchanged": unchanged,
+            "observationDigest": digest,
+            "observation": if unchanged { Value::Null } else { observation },
+            "connectionDigestMatched": connection_match,
+        }
+    })
+}
+
+fn native_protocol_error(message: &str) -> Value {
+    serde_json::json!({
+        "success": false,
+        "error": message,
+        "data": {
+            "schemaVersion": NATIVE_FUSION_SCHEMA_V1,
+            "nativeProtocolError": true,
+        }
+    })
+}
+
+fn response_succeeded(response: &Value) -> bool {
+    response.get("success").and_then(Value::as_bool) == Some(true)
+}
+
+fn observation_digest(response: &Value) -> String {
+    // This is a connection-local transport fingerprint, never an
+    // authorization token, integrity proof, or persisted state hash.
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    canonical_observation_payload(response).hash(&mut hasher);
+    format!("state64:{:016x}", hasher.finish())
+}
+
+fn canonical_observation_payload(response: &Value) -> String {
+    serde_json::to_string(&serde_json::json!({
+        "success": response.get("success"),
+        "data": response.get("data"),
+        "error": response.get("error"),
+    }))
+    .unwrap_or_default()
 }
 
 fn looks_like_http(line: &str) -> bool {

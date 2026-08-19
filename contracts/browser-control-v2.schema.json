@@ -1,0 +1,136 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://tempera.dev/schemas/browser-control-v2.schema.json",
+  "title": "Tempera Browser Control V2",
+  "oneOf": [
+    { "$ref": "#/$defs/snapshot" },
+    { "$ref": "#/$defs/action" },
+    { "$ref": "#/$defs/receipt" },
+    { "$ref": "#/$defs/actObserve" }
+  ],
+  "$defs": {
+    "node": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ref", "role", "label"],
+      "properties": {
+        "ref": { "type": "string", "pattern": "^@[ed][1-9][0-9]*$" },
+        "role": { "type": "string", "maxLength": 80 },
+        "label": { "type": "string", "maxLength": 512 },
+        "value": { "type": "string", "maxLength": 512 },
+        "resourceId": { "type": "string", "maxLength": 512 },
+        "disabled": { "type": "boolean" },
+        "checked": { "type": "boolean" },
+        "selected": { "type": "boolean" },
+        "sensitive": { "type": "boolean" },
+        "bounds": {
+          "type": "array",
+          "prefixItems": [
+            { "type": "integer" },
+            { "type": "integer" },
+            { "type": "integer", "minimum": 0 },
+            { "type": "integer", "minimum": 0 }
+          ],
+          "items": false
+        }
+      }
+    },
+    "snapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schemaVersion", "targetKind", "revision", "stateHash", "nodes"],
+      "properties": {
+        "schemaVersion": { "const": "tempera.browser.snapshot/v2" },
+        "sessionId": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "targetId": { "type": "string", "minLength": 1, "maxLength": 512 },
+        "targetKind": {
+          "enum": ["chromium-cdp", "webdriver-bidi", "android-webview", "android-accessibility"]
+        },
+        "revision": { "type": "integer", "minimum": 0 },
+        "stateHash": { "type": "string", "minLength": 8, "maxLength": 160 },
+        "baseRevision": { "type": "integer", "minimum": 0 },
+        "unchanged": { "type": "boolean" },
+        "url": { "type": "string", "maxLength": 16384 },
+        "title": { "type": "string", "maxLength": 2048 },
+        "nodes": {
+          "type": "array",
+          "maxItems": 5000,
+          "items": { "$ref": "#/$defs/node" }
+        },
+        "removedRefs": {
+          "type": "array",
+          "maxItems": 5000,
+          "items": { "type": "string", "pattern": "^@[ed][1-9][0-9]*$" }
+        },
+        "truncated": { "type": "boolean" },
+        "trustedForConsequentialActions": { "type": "boolean" }
+      }
+    },
+    "action": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schemaVersion", "actionId", "kind", "expectedRevision", "expectedStateHash"],
+      "properties": {
+        "schemaVersion": { "const": "tempera.browser.action/v2" },
+        "actionId": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "kind": {
+          "enum": ["tap", "longPress", "fill", "type", "press", "scroll", "swipe", "navigate", "back", "wait"]
+        },
+        "ref": { "type": "string", "pattern": "^@[ed][1-9][0-9]*$" },
+        "text": { "type": "string", "maxLength": 1048576 },
+        "secretRef": { "type": "string", "minLength": 1, "maxLength": 512 },
+        "key": { "type": "string", "maxLength": 80 },
+        "direction": { "enum": ["up", "down", "left", "right"] },
+        "url": { "type": "string", "maxLength": 16384 },
+        "expectedRevision": { "type": "integer", "minimum": 0 },
+        "expectedStateHash": { "type": "string", "minLength": 8, "maxLength": 160 },
+        "approvalRef": { "type": "string", "minLength": 1, "maxLength": 512 },
+        "timeoutMs": { "type": "integer", "minimum": 0, "maximum": 120000 }
+      },
+      "allOf": [
+        {
+          "not": {
+            "required": ["text", "secretRef"]
+          }
+        }
+      ]
+    },
+    "receipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schemaVersion", "actionId", "executed", "beforeRevision", "beforeStateHash"],
+      "properties": {
+        "schemaVersion": { "const": "tempera.browser.action-receipt/v2" },
+        "actionId": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "executed": { "type": "boolean" },
+        "stale": { "type": "boolean" },
+        "transport": {
+          "enum": ["cdp", "bidi", "android-dom", "android-accessibility", "vision"]
+        },
+        "beforeRevision": { "type": "integer", "minimum": 0 },
+        "afterRevision": { "type": "integer", "minimum": 0 },
+        "beforeStateHash": { "type": "string", "minLength": 8, "maxLength": 160 },
+        "afterStateHash": { "type": "string", "minLength": 8, "maxLength": 160 },
+        "error": { "type": "string", "maxLength": 4096 },
+        "evidenceRefs": {
+          "type": "array",
+          "maxItems": 128,
+          "items": { "type": "string", "maxLength": 512 }
+        }
+      }
+    },
+    "actObserve": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schemaVersion", "action", "receipt", "observation"],
+      "properties": {
+        "schemaVersion": { "const": "tempera.browser.act-observe/v2" },
+        "action": { "$ref": "#/$defs/action" },
+        "receipt": { "$ref": "#/$defs/receipt" },
+        "observation": { "$ref": "#/$defs/snapshot" },
+        "elapsedMs": { "type": "number", "minimum": 0 },
+        "waitReason": { "type": "string", "maxLength": 256 }
+      }
+    }
+  }
+}
