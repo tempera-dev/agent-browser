@@ -129,7 +129,11 @@ fn mutation_is_not_replayed_after_ambiguous_upstream_eof() {
 
     let deliveries = rx.recv_timeout(IO_TIMEOUT).expect("receive delivery count");
     server.join().expect("join fake upstream");
-    assert_eq!(deliveries.len(), 1, "mutation must be delivered at most once");
+    assert_eq!(
+        deliveries.len(),
+        1,
+        "mutation must be delivered at most once"
+    );
     assert_eq!(deliveries[0].trim_end(), mutation);
 }
 
@@ -156,8 +160,7 @@ fn readonly_observation_reconnects_once_with_identical_request() {
 
     let gateway = Gateway::spawn(upstream_address);
     let mut client = gateway.connect();
-    let observation =
-        r#"{"command":{"name":"snapshot"},"sessionId":"s1","targetId":"t1"}"#;
+    let observation = r#"{"command":{"name":"snapshot"},"sessionId":"s1","targetId":"t1"}"#;
     writeln!(client, "{observation}").expect("send observation");
     client.flush().expect("flush observation");
 
@@ -170,7 +173,9 @@ fn readonly_observation_reconnects_once_with_identical_request() {
         "gateway should surface the successful replay response: {response}"
     );
 
-    let (first, second) = rx.recv_timeout(IO_TIMEOUT).expect("receive observed requests");
+    let (first, second) = rx
+        .recv_timeout(IO_TIMEOUT)
+        .expect("receive observed requests");
     server.join().expect("join fake upstream");
     assert_eq!(first.trim_end(), observation);
     assert_eq!(second.trim_end(), observation);
