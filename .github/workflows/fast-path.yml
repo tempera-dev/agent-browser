@@ -37,3 +37,32 @@ jobs:
         run: cargo clippy --manifest-path fast-path/Cargo.toml --all-targets --locked -- -D warnings
       - name: Release build
         run: cargo build --manifest-path fast-path/Cargo.toml --release --locked
+
+  transport-benchmark:
+    name: transport-only benchmark (ubuntu)
+    needs: validate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build release gateway
+        run: cargo build --manifest-path fast-path/Cargo.toml --release --locked
+      - name: Validate benchmark harness
+        run: python -m py_compile fast-path/bench/transport_bench.py
+      - name: Measure persistent loopback transport
+        run: |
+          python fast-path/bench/transport_bench.py \
+            --gateway fast-path/target/release/tempera-browser-fastpath \
+            --iterations 4000 \
+            --warmup 250 \
+            --concurrent-per-client 250 \
+            --output fast-path-benchmark.json
+      - name: Publish benchmark evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: browser-fastpath-transport-benchmark-${{ github.sha }}
+          path: fast-path-benchmark.json
+          if-no-files-found: error
