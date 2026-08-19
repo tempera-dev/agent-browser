@@ -140,7 +140,7 @@ fn parse_args() -> io::Result<Config> {
             "observe TTL must be <= 100 ms",
         ));
     }
-    if max_line_bytes < 1024 || max_line_bytes > 64 * 1024 * 1024 {
+    if !(1024..=64 * 1024 * 1024).contains(&max_line_bytes) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "max line bytes must be between 1 KiB and 64 MiB",
