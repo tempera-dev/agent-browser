@@ -1,0 +1,37 @@
+name: one-shot fast-path format
+
+on:
+  push:
+    branches:
+      - agent/runtime-speed-v2
+
+permissions:
+  contents: write
+
+jobs:
+  format:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/runtime-speed-v2
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Format fast path
+        run: cargo fmt --manifest-path fast-path/Cargo.toml
+      - name: Commit formatting
+        shell: bash
+        run: |
+          set -euo pipefail
+          git add fast-path/src/main.rs
+          if git diff --cached --quiet; then
+            echo 'Already formatted'
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'style: format browser fast path'
+          git push origin HEAD:agent/runtime-speed-v2
