@@ -207,7 +207,7 @@ fn handle_client(
             handle_observation(trimmed, &request, &mut upstream, config, state)?
         } else {
             invalidate_cache(state);
-            forward(trimmed, &mut upstream, state)?
+            forward_mutating(trimmed, &mut upstream, state)?
         };
 
         writer.write_all(response.as_bytes())?;
@@ -244,7 +244,7 @@ fn handle_observation(
         return Ok(hit);
     }
 
-    let response = forward(raw, upstream, state)?;
+    let response = forward_readonly(raw, upstream, state)?;
     state.cache.lock().expect("cache poisoned").insert(
         key,
         CachedResponse {
@@ -270,30 +270,108 @@ fn handle_fused(
     let observe = arguments
         .get("observeRequest")
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "missing observeRequest"))?;
-    let action_response = forward(&action.to_string(), upstream, state)?;
+
+    let native_request = json!({
+        "id": request.get("id").cloned().unwrap_or(Value::Null),
+        "action": "__tempera_act_observe_v1",
+        "actionRequest": action,
+        "observeRequest": observe,
+    });
+    let native_response = forward_mutating(&native_request.to_string(), upstream, state)?;
+    let parsed_native: Value = serde_json::from_str(&native_response).unwrap_or(Value::Null);
+    let native_protocol_error = parsed_native
+        .pointer("/data/nativeProtocolError")
+        .and_then(Value::as_bool)
+        == Some(true)
+        || parsed_native
+            .get("error")
+            .and_then(Value::as_str)
+            .is_some_and(|error| error.contains("Unknown action"));
+
+    if !native_protocol_error {
+        let data = parsed_native.get("data").cloned().unwrap_or(Value::Null);
+        return Ok(json!({
+            "schemaVersion": "tempera.browser.fastpath.act-observe/v1",
+            "ok": parsed_native
+                .get("success")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+            "action": data.get("action").cloned().unwrap_or(Value::Null),
+            "observation": data
+                .get("observation")
+                .cloned()
+                .unwrap_or(Value::Null),
+            "observationDigest": data
+                .get("observationDigest")
+                .cloned()
+                .unwrap_or(Value::Null),
+            "nativeFused": true,
+        })
+        .to_string());
+    }
+
+    // Compatibility only. An old daemon may reject the unknown
+    // internal command before any mutation runs. The real action is
+    // then sent exactly once; its transport failure is never replayed.
+    let action_response = forward_mutating(&action.to_string(), upstream, state)?;
     let parsed_action: Value = serde_json::from_str(&action_response).unwrap_or(Value::Null);
-    if parsed_action.get("ok").and_then(Value::as_bool) == Some(false) {
+    if parsed_action.get("success").and_then(Value::as_bool) == Some(false)
+        || parsed_action.get("ok").and_then(Value::as_bool) == Some(false)
+    {
         return Ok(json!({
             "schemaVersion": "tempera.browser.fastpath.act-observe/v1",
             "ok": false,
             "action": parsed_action,
-            "observation": null
+            "observation": null,
+            "nativeFused": false,
         })
         .to_string());
     }
-    let observation_response = forward(&observe.to_string(), upstream, state)?;
+
+    let observation_response = forward_readonly(&observe.to_string(), upstream, state)?;
     let parsed_observation: Value =
         serde_json::from_str(&observation_response).unwrap_or(Value::Null);
     Ok(json!({
         "schemaVersion": "tempera.browser.fastpath.act-observe/v1",
-        "ok": parsed_observation.get("ok").and_then(Value::as_bool).unwrap_or(true),
+        "ok": parsed_observation
+            .get("success")
+            .or_else(|| parsed_observation.get("ok"))
+            .and_then(Value::as_bool)
+            .unwrap_or(true),
         "action": parsed_action,
-        "observation": parsed_observation
+        "observation": parsed_observation,
+        "nativeFused": false,
     })
     .to_string())
 }
 
-fn forward(raw: &str, upstream: &mut Upstream, state: &Arc<SharedState>) -> io::Result<String> {
+fn forward_mutating(
+    raw: &str,
+    upstream: &mut Upstream,
+    state: &Arc<SharedState>,
+) -> io::Result<String> {
+    state.stats.forwarded.fetch_add(1, Ordering::Relaxed);
+    match upstream.round_trip(raw) {
+        Ok(response) => Ok(response),
+        Err(error) => {
+            // Once bytes may have reached the canonical daemon, retry
+            // would violate at-most-once browser action semantics.
+            upstream.disconnect();
+            Err(io::Error::new(
+                error.kind(),
+                format!(
+                    "upstream mutation delivery may be unknown; request was not replayed: {error}"
+                ),
+            ))
+        }
+    }
+}
+
+fn forward_readonly(
+    raw: &str,
+    upstream: &mut Upstream,
+    state: &Arc<SharedState>,
+) -> io::Result<String> {
     state.stats.forwarded.fetch_add(1, Ordering::Relaxed);
     match upstream.round_trip(raw) {
         Ok(response) => Ok(response),
@@ -303,7 +381,9 @@ fn forward(raw: &str, upstream: &mut Upstream, state: &Arc<SharedState>) -> io::
             upstream.round_trip(raw).map_err(|second| {
                 io::Error::new(
                     second.kind(),
-                    format!("upstream failed after reconnect: first={first}; second={second}"),
+                    format!(
+                        "read-only upstream failed after reconnect: first={first}; second={second}"
+                    ),
                 )
             })
         }
