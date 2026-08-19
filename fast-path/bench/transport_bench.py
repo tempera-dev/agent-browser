@@ -15,7 +15,6 @@ import os
 import platform
 import socket
 import subprocess
-import sys
 import threading
 import time
 from pathlib import Path
@@ -51,7 +50,8 @@ def summarize(samples_us: list[float], sent: int, received: int) -> dict[str, An
 def free_address() -> tuple[str, int]:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
         listener.bind(("127.0.0.1", 0))
-        return listener.getsockname()
+        host, port = listener.getsockname()
+        return host, port
 
 
 class MockDaemon:
@@ -63,7 +63,8 @@ class MockDaemon:
         self.listener.bind(("127.0.0.1", 0))
         self.listener.listen(128)
         self.listener.settimeout(0.2)
-        self.address = self.listener.getsockname()
+        host, port = self.listener.getsockname()
+        self.address = (host, port)
         self._stop = threading.Event()
         self._threads: list[threading.Thread] = []
         self._accept_thread = threading.Thread(target=self._accept_loop, daemon=True)
@@ -152,11 +153,39 @@ class MockDaemon:
                 writer.close()
 
 
-def connect(address: tuple[str, int]) -> socket.socket:
-    connection = socket.create_connection(address, timeout=READ_TIMEOUT_SECONDS)
-    connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-    connection.settimeout(READ_TIMEOUT_SECONDS)
-    return connection
+class JsonlClient:
+    """One persistent TCP connection and one persistent buffered reader."""
+
+    def __init__(self, address: tuple[str, int]) -> None:
+        self.socket = socket.create_connection(address, timeout=READ_TIMEOUT_SECONDS)
+        self.socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        self.socket.settimeout(READ_TIMEOUT_SECONDS)
+        self.reader = self.socket.makefile("rb")
+
+    def close(self) -> None:
+        try:
+            self.reader.close()
+        finally:
+            self.socket.close()
+
+    def __enter__(self) -> "JsonlClient":
+        return self
+
+    def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
+        self.close()
+
+    def request(self, request: dict[str, Any]) -> tuple[float, int, int, dict[str, Any]]:
+        payload = json.dumps(request, separators=(",", ":")).encode() + b"\n"
+        started = time.perf_counter_ns()
+        self.socket.sendall(payload)
+        response_line = self.reader.readline()
+        elapsed_us = (time.perf_counter_ns() - started) / 1_000.0
+        if not response_line:
+            raise RuntimeError("peer closed before benchmark response")
+        response = json.loads(response_line)
+        if response.get("success") is False or response.get("ok") is False:
+            raise RuntimeError(f"benchmark request failed: {response}")
+        return elapsed_us, len(payload), len(response_line), response
 
 
 def wait_for_gateway(process: subprocess.Popen[bytes], address: tuple[str, int]) -> None:
@@ -172,25 +201,6 @@ def wait_for_gateway(process: subprocess.Popen[bytes], address: tuple[str, int])
     raise RuntimeError("gateway did not become ready")
 
 
-def round_trip(connection: socket.socket, request: dict[str, Any]) -> tuple[float, int, int, dict[str, Any]]:
-    payload = json.dumps(request, separators=(",", ":")).encode() + b"\n"
-    started = time.perf_counter_ns()
-    connection.sendall(payload)
-    reader = connection.makefile("rb")
-    try:
-        response_line = reader.readline()
-    finally:
-        # makefile owns a duplicate buffered wrapper, not the underlying socket.
-        reader.close()
-    elapsed_us = (time.perf_counter_ns() - started) / 1_000.0
-    if not response_line:
-        raise RuntimeError("peer closed before benchmark response")
-    response = json.loads(response_line)
-    if response.get("success") is False or response.get("ok") is False:
-        raise RuntimeError(f"benchmark request failed: {response}")
-    return elapsed_us, len(payload), len(response_line), response
-
-
 def benchmark_series(
     address: tuple[str, int],
     requests: list[dict[str, Any]],
@@ -199,11 +209,11 @@ def benchmark_series(
     samples: list[float] = []
     sent = 0
     received = 0
-    with connect(address) as connection:
+    with JsonlClient(address) as client:
         for request in requests[:warmup]:
-            round_trip(connection, request)
+            client.request(request)
         for request in requests[warmup:]:
-            elapsed, request_bytes, response_bytes, _ = round_trip(connection, request)
+            elapsed, request_bytes, response_bytes, _ = client.request(request)
             samples.append(elapsed)
             sent += request_bytes
             received += response_bytes
@@ -226,7 +236,7 @@ def benchmark_concurrent(
         local_sent = 0
         local_received = 0
         try:
-            with connect(address) as connection:
+            with JsonlClient(address) as client:
                 barrier.wait(timeout=READ_TIMEOUT_SECONDS)
                 for index in range(per_client):
                     request = {
@@ -235,13 +245,11 @@ def benchmark_concurrent(
                         "targetId": f"target-{worker_id}",
                         "nonce": index,
                     }
-                    elapsed, request_bytes, response_bytes, _ = round_trip(
-                        connection, request
-                    )
+                    elapsed, request_bytes, response_bytes, _ = client.request(request)
                     local_samples.append(elapsed)
                     local_sent += request_bytes
                     local_received += response_bytes
-        except Exception as error:  # noqa: BLE001 - benchmark must report worker failures
+        except Exception as error:
             with lock:
                 failures.append(f"worker {worker_id}: {error}")
             return
@@ -270,8 +278,8 @@ def benchmark_concurrent(
 
 
 def gateway_stats(address: tuple[str, int]) -> dict[str, Any]:
-    with connect(address) as connection:
-        _, _, _, response = round_trip(connection, {"command": {"name": "gatewayStats"}})
+    with JsonlClient(address) as client:
+        _, _, _, response = client.request({"command": {"name": "gatewayStats"}})
     return response.get("result", {})
 
 
@@ -285,6 +293,8 @@ def main() -> int:
     args = parser.parse_args()
     if args.iterations <= args.warmup or args.warmup < 0:
         parser.error("iterations must be greater than warmup")
+    if args.concurrent_per_client <= 0:
+        parser.error("concurrent-per-client must be positive")
     if not args.gateway.is_file():
         parser.error(f"gateway binary not found: {args.gateway}")
 
@@ -349,10 +359,10 @@ def main() -> int:
         cached = benchmark_series(gateway_address, cached_requests, args.warmup)
         fused = benchmark_series(gateway_address, fused_requests, args.warmup)
         concurrency = {
-            str(clients): benchmark_concurrent(
-                gateway_address, clients, args.concurrent_per_client
+            str(client_count): benchmark_concurrent(
+                gateway_address, client_count, args.concurrent_per_client
             )
-            for clients in (1, 8, 32)
+            for client_count in (1, 8, 32)
         }
         stats = gateway_stats(gateway_address)
 
@@ -398,7 +408,7 @@ def main() -> int:
             "validity": {
                 "allRequestsSucceeded": True,
                 "universalMultiplierClaim": False,
-                "note": "Compare only runs from equivalent hosts/builds; this isolates loopback gateway cost.",
+                "note": "Compare only equivalent hosts/builds; this isolates loopback gateway cost.",
             },
         }
         encoded = json.dumps(result, indent=2, sort_keys=True)
