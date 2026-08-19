@@ -4,6 +4,14 @@ on:
   push:
     branches:
       - agent/runtime-speed-v2
+  pull_request:
+    branches:
+      - main
+    paths:
+      - "cli/src/native/daemon.rs"
+      - "fast-path/src/main.rs"
+      - "docs/NATIVE_FUSION_VALIDATION.md"
+      - ".github/workflows/one-shot-native-fusion-commit.yml"
 
 permissions:
   contents: write
