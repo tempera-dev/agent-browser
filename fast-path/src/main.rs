@@ -240,10 +240,7 @@ fn handle_observation(
     let _guard = key_lock.lock().expect("observation key lock poisoned");
 
     if let Some(hit) = cached(&key, config.observe_ttl, state) {
-        state
-            .stats
-            .coalesced_hits
-            .fetch_add(1, Ordering::Relaxed);
+        state.stats.coalesced_hits.fetch_add(1, Ordering::Relaxed);
         return Ok(hit);
     }
 
@@ -267,12 +264,12 @@ fn handle_fused(
         .get("arguments")
         .and_then(Value::as_object)
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "missing arguments"))?;
-    let action = arguments.get("actionRequest").ok_or_else(|| {
-        io::Error::new(io::ErrorKind::InvalidInput, "missing actionRequest")
-    })?;
-    let observe = arguments.get("observeRequest").ok_or_else(|| {
-        io::Error::new(io::ErrorKind::InvalidInput, "missing observeRequest")
-    })?;
+    let action = arguments
+        .get("actionRequest")
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "missing actionRequest"))?;
+    let observe = arguments
+        .get("observeRequest")
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "missing observeRequest"))?;
     let action_response = forward(&action.to_string(), upstream, state)?;
     let parsed_action: Value = serde_json::from_str(&action_response).unwrap_or(Value::Null);
     if parsed_action.get("ok").and_then(Value::as_bool) == Some(false) {
