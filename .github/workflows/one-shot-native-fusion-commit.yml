@@ -1,0 +1,347 @@
+name: one-shot native browser fusion commit
+
+on:
+  push:
+    branches:
+      - agent/runtime-speed-v2
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/runtime-speed-v2
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Apply native fusion and at-most-once transport
+        shell: python
+        run: |
+          from pathlib import Path
+
+          daemon = Path('cli/src/native/daemon.rs')
+          text = daemon.read_text()
+          if 'NATIVE_ACT_OBSERVE_ACTION' not in text:
+              old = 'use std::fs;\nuse std::io::Write;'
+              new = 'use std::fs;\nuse std::hash::{Hash, Hasher};\nuse std::io::Write;'
+              if old not in text:
+                  raise SystemExit('daemon import anchor missing')
+              text = text.replace(old, new, 1)
+              old = '    let mut line = String::new();\n\n    loop {'
+              new = '    let mut line = String::new();\n    let mut last_observation_digest: Option<String> = None;\n\n    loop {'
+              if old not in text:
+                  raise SystemExit('daemon connection anchor missing')
+              text = text.replace(old, new, 1)
+              old = '''                let response = {
+                    let mut s = state.lock().await;
+                    execute_command(&cmd, &mut s).await
+                };'''
+              new = '''                let response = {
+                    let mut s = state.lock().await;
+                    execute_connection_command(&cmd, &mut s, &mut last_observation_digest).await
+                };'''
+              if old not in text:
+                  raise SystemExit('daemon dispatch anchor missing')
+              text = text.replace(old, new, 1)
+              anchor = 'fn looks_like_http(line: &str) -> bool {'
+              if anchor not in text:
+                  raise SystemExit('daemon helper anchor missing')
+              helper = r'''const NATIVE_ACT_OBSERVE_ACTION: &str = "__tempera_act_observe_v1";
+          const NATIVE_SNAPSHOT_DELTA_ACTION: &str = "__tempera_snapshot_delta_v1";
+          const NATIVE_FUSION_SCHEMA_V1: &str = "tempera.browser.native-fusion/v1";
+
+          async fn execute_connection_command(
+              cmd: &Value,
+              state: &mut DaemonState,
+              last_observation_digest: &mut Option<String>,
+          ) -> Value {
+              let action = cmd.get("action").and_then(Value::as_str).unwrap_or_default();
+              match action {
+                  NATIVE_ACT_OBSERVE_ACTION => {
+                      native_act_observe(cmd, state, last_observation_digest).await
+                  }
+                  NATIVE_SNAPSHOT_DELTA_ACTION => {
+                      native_snapshot_delta(cmd, state, last_observation_digest).await
+                  }
+                  "snapshot" => {
+                      let response = execute_command(cmd, state).await;
+                      if response_succeeded(&response) {
+                          *last_observation_digest = Some(observation_digest(&response));
+                      }
+                      response
+                  }
+                  _ => {
+                      *last_observation_digest = None;
+                      execute_command(cmd, state).await
+                  }
+              }
+          }
+
+          async fn native_act_observe(
+              cmd: &Value,
+              state: &mut DaemonState,
+              last_observation_digest: &mut Option<String>,
+          ) -> Value {
+              let Some(action_request) = cmd.get("actionRequest").filter(|value| value.is_object()) else {
+                  return native_protocol_error("act-observe requires object actionRequest");
+              };
+              let Some(observe_request) = cmd.get("observeRequest").filter(|value| value.is_object()) else {
+                  return native_protocol_error("act-observe requires object observeRequest");
+              };
+              if observe_request.get("action").and_then(Value::as_str) != Some("snapshot") {
+                  return native_protocol_error("act-observe currently requires snapshot observation");
+              }
+              if action_request.get("action").and_then(Value::as_str).is_none() {
+                  return native_protocol_error("act-observe actionRequest requires action");
+              }
+
+              *last_observation_digest = None;
+              let started = std::time::Instant::now();
+              let action_response = execute_command(action_request, state).await;
+              if !response_succeeded(&action_response) {
+                  return serde_json::json!({
+                      "success": false,
+                      "error": "native fused action failed",
+                      "data": {
+                          "schemaVersion": NATIVE_FUSION_SCHEMA_V1,
+                          "action": action_response,
+                          "observation": Value::Null,
+                          "nativeFused": true,
+                          "elapsedMicros": started.elapsed().as_micros(),
+                      }
+                  });
+              }
+              let observation = execute_command(observe_request, state).await;
+              let observation_success = response_succeeded(&observation);
+              let digest = observation_success.then(|| observation_digest(&observation));
+              if let Some(ref digest) = digest {
+                  *last_observation_digest = Some(digest.clone());
+              }
+              serde_json::json!({
+                  "success": observation_success,
+                  "error": if observation_success {
+                      Value::Null
+                  } else {
+                      observation.get("error").cloned().unwrap_or_else(|| Value::String("native fused observation failed".to_string()))
+                  },
+                  "data": {
+                      "schemaVersion": NATIVE_FUSION_SCHEMA_V1,
+                      "action": action_response,
+                      "observation": observation,
+                      "observationDigest": digest,
+                      "nativeFused": true,
+                      "elapsedMicros": started.elapsed().as_micros(),
+                  }
+              })
+          }
+
+          async fn native_snapshot_delta(
+              cmd: &Value,
+              state: &mut DaemonState,
+              last_observation_digest: &mut Option<String>,
+          ) -> Value {
+              let Some(observe_request) = cmd.get("observeRequest").filter(|value| value.is_object()) else {
+                  return native_protocol_error("snapshot-delta requires object observeRequest");
+              };
+              if observe_request.get("action").and_then(Value::as_str) != Some("snapshot") {
+                  return native_protocol_error("snapshot-delta requires snapshot observeRequest");
+              }
+              let previous = cmd.get("previousDigest").and_then(Value::as_str);
+              let had_prior = last_observation_digest.is_some();
+              let observation = execute_command(observe_request, state).await;
+              if !response_succeeded(&observation) {
+                  return observation;
+              }
+              let digest = observation_digest(&observation);
+              let unchanged = previous == Some(digest.as_str());
+              *last_observation_digest = Some(digest.clone());
+              serde_json::json!({
+                  "success": true,
+                  "data": {
+                      "schemaVersion": NATIVE_FUSION_SCHEMA_V1,
+                      "unchanged": unchanged,
+                      "observationDigest": digest,
+                      "observation": if unchanged { Value::Null } else { observation },
+                      "connectionHadPriorObservation": had_prior,
+                  }
+              })
+          }
+
+          fn native_protocol_error(message: &str) -> Value {
+              serde_json::json!({
+                  "success": false,
+                  "error": message,
+                  "data": {
+                      "schemaVersion": NATIVE_FUSION_SCHEMA_V1,
+                      "nativeProtocolError": true,
+                  }
+              })
+          }
+
+          fn response_succeeded(response: &Value) -> bool {
+              response.get("success").and_then(Value::as_bool) == Some(true)
+          }
+
+          fn observation_digest(response: &Value) -> String {
+              let mut hasher = std::collections::hash_map::DefaultHasher::new();
+              canonical_observation_payload(response).hash(&mut hasher);
+              format!("state64:{:016x}", hasher.finish())
+          }
+
+          fn canonical_observation_payload(response: &Value) -> String {
+              serde_json::to_string(&serde_json::json!({
+                  "success": response.get("success"),
+                  "data": response.get("data"),
+                  "error": response.get("error"),
+              }))
+              .unwrap_or_default()
+          }
+
+          '''
+              text = text.replace(anchor, helper + anchor, 1)
+              daemon.write_text(text)
+
+          fast = Path('fast-path/src/main.rs')
+          text = fast.read_text()
+          if 'fn forward_once(' not in text:
+              text = text.replace(
+                  '            forward(trimmed, &mut upstream, state)?',
+                  '            forward_once(trimmed, &mut upstream, state)?',
+                  1,
+              )
+              text = text.replace(
+                  '    let response = forward(raw, upstream, state)?;',
+                  '    let response = forward_readonly(raw, upstream, state)?;',
+                  1,
+              )
+              fused_start = text.index('fn handle_fused(')
+              forward_start = text.index('fn forward(', fused_start)
+              fused = r'''fn handle_fused(
+              request: &Value,
+              upstream: &mut Upstream,
+              state: &Arc<SharedState>,
+          ) -> io::Result<String> {
+              let arguments = request
+                  .get("arguments")
+                  .and_then(Value::as_object)
+                  .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "missing arguments"))?;
+              let action = arguments
+                  .get("actionRequest")
+                  .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "missing actionRequest"))?;
+              let observe = arguments
+                  .get("observeRequest")
+                  .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "missing observeRequest"))?;
+              let native = json!({
+                  "id": request.get("id").cloned().unwrap_or(Value::Null),
+                  "action": "__tempera_act_observe_v1",
+                  "actionRequest": action,
+                  "observeRequest": observe,
+              });
+              let response = forward_once(&native.to_string(), upstream, state)?;
+              let parsed: Value = serde_json::from_str(&response).unwrap_or(Value::Null);
+              let protocol_error = parsed.pointer("/data/nativeProtocolError").and_then(Value::as_bool) == Some(true)
+                  || parsed.get("error").and_then(Value::as_str).is_some_and(|error| error.contains("Unknown action"));
+              if !protocol_error {
+                  let data = parsed.get("data").cloned().unwrap_or(Value::Null);
+                  return Ok(json!({
+                      "schemaVersion": "tempera.browser.fastpath.act-observe/v1",
+                      "ok": parsed.get("success").and_then(Value::as_bool).unwrap_or(false),
+                      "action": data.get("action").cloned().unwrap_or(Value::Null),
+                      "observation": data.get("observation").cloned().unwrap_or(Value::Null),
+                      "observationDigest": data.get("observationDigest").cloned().unwrap_or(Value::Null),
+                      "nativeFused": true,
+                  }).to_string());
+              }
+              let action_response = forward_once(&action.to_string(), upstream, state)?;
+              let parsed_action: Value = serde_json::from_str(&action_response).unwrap_or(Value::Null);
+              if parsed_action.get("success").and_then(Value::as_bool) == Some(false)
+                  || parsed_action.get("ok").and_then(Value::as_bool) == Some(false)
+              {
+                  return Ok(json!({
+                      "schemaVersion": "tempera.browser.fastpath.act-observe/v1",
+                      "ok": false,
+                      "action": parsed_action,
+                      "observation": null,
+                      "nativeFused": false,
+                  }).to_string());
+              }
+              let observation_response = forward_readonly(&observe.to_string(), upstream, state)?;
+              let parsed_observation: Value = serde_json::from_str(&observation_response).unwrap_or(Value::Null);
+              Ok(json!({
+                  "schemaVersion": "tempera.browser.fastpath.act-observe/v1",
+                  "ok": parsed_observation.get("success").or_else(|| parsed_observation.get("ok")).and_then(Value::as_bool).unwrap_or(true),
+                  "action": parsed_action,
+                  "observation": parsed_observation,
+                  "nativeFused": false,
+              }).to_string())
+          }
+
+          '''
+              text = text[:fused_start] + fused + text[forward_start:]
+              start = text.index('fn forward(')
+              end = text.index('fn cached(', start)
+              forwarding = r'''fn forward_once(
+              raw: &str,
+              upstream: &mut Upstream,
+              state: &Arc<SharedState>,
+          ) -> io::Result<String> {
+              state.stats.forwarded.fetch_add(1, Ordering::Relaxed);
+              match upstream.round_trip(raw) {
+                  Ok(response) => Ok(response),
+                  Err(error) => {
+                      upstream.disconnect();
+                      Err(io::Error::new(
+                          error.kind(),
+                          format!("upstream mutation delivery may be unknown; request was not replayed: {error}"),
+                      ))
+                  }
+              }
+          }
+
+          fn forward_readonly(
+              raw: &str,
+              upstream: &mut Upstream,
+              state: &Arc<SharedState>,
+          ) -> io::Result<String> {
+              state.stats.forwarded.fetch_add(1, Ordering::Relaxed);
+              match upstream.round_trip(raw) {
+                  Ok(response) => Ok(response),
+                  Err(first) => {
+                      state.stats.reconnects.fetch_add(1, Ordering::Relaxed);
+                      upstream.disconnect();
+                      upstream.round_trip(raw).map_err(|second| {
+                          io::Error::new(
+                              second.kind(),
+                              format!("read-only upstream failed after reconnect: first={first}; second={second}"),
+                          )
+                      })
+                  }
+              }
+          }
+
+          '''
+              text = text[:start] + forwarding + text[end:]
+              fast.write_text(text)
+      - name: Format patched sources
+        run: |
+          cargo fmt --manifest-path cli/Cargo.toml
+          cargo fmt --manifest-path fast-path/Cargo.toml
+      - name: Commit for canonical CI
+        shell: bash
+        run: |
+          set -euo pipefail
+          git add cli/src/native/daemon.rs fast-path/src/main.rs
+          if git diff --cached --quiet; then
+            echo 'Native fusion already present'
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'perf: fuse native browser action observation'
+          git push origin HEAD:agent/runtime-speed-v2
