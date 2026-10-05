@@ -276,25 +276,7 @@ async fn run_socket_server(
                 }
             }
             _ = drain_interval.tick() => {
-                let mut s = state.lock().await;
-                let process_exited = s
-                    .browser
-                    .as_mut()
-                    .map(|mgr| mgr.has_process_exited())
-                    .unwrap_or(false);
-                if process_exited {
-                    let _ = close_current_browser(&mut s).await;
-                } else if s.browser.is_some() {
-                    if let Err(error) = s.drain_cdp_events_background().await {
-                        let _ = writeln!(
-                            std::io::stderr(),
-                            "Failed to apply browser network controls: {}",
-                            error
-                        );
-                    } else {
-                        maybe_autosave_restore_state(&mut s, autosave_interval_ms).await;
-                    }
-                }
+                spawn_background_tick_if_idle(state.clone(), autosave_interval_ms);
             }
             _ = async {
                 match idle_sleep_pin {
@@ -430,18 +412,7 @@ async fn run_socket_server(
                 }
             }
             _ = drain_interval.tick() => {
-                let mut s = state.lock().await;
-                let process_exited = s
-                    .browser
-                    .as_mut()
-                    .map(|mgr| mgr.has_process_exited())
-                    .unwrap_or(false);
-                if process_exited {
-                    let _ = close_current_browser(&mut s).await;
-                } else if s.browser.is_some() {
-                    s.drain_cdp_events_background().await;
-                    maybe_autosave_restore_state(&mut s, autosave_interval_ms).await;
-                }
+                spawn_background_tick_if_idle(state.clone(), autosave_interval_ms);
             }
             _ = async {
                 match idle_sleep_pin {
@@ -498,6 +469,39 @@ async fn run_socket_server(
     }
 
     Ok(())
+}
+
+/// Run the periodic browser maintenance tick in the background, skipping it
+/// when a command holds the state lock. A skipped tick loses nothing: CDP
+/// events stay buffered and autosave is rechecked on the next tick.
+fn spawn_background_tick_if_idle(
+    state: Arc<tokio::sync::Mutex<DaemonState>>,
+    autosave_interval_ms: u64,
+) -> bool {
+    let Ok(mut state) = state.try_lock_owned() else {
+        return false;
+    };
+    tokio::spawn(async move {
+        let process_exited = state
+            .browser
+            .as_mut()
+            .map(|mgr| mgr.has_process_exited())
+            .unwrap_or(false);
+        if process_exited {
+            let _ = close_current_browser(&mut state).await;
+        } else if state.browser.is_some() {
+            if let Err(error) = state.drain_cdp_events_background().await {
+                let _ = writeln!(
+                    std::io::stderr(),
+                    "Failed to apply browser network controls: {}",
+                    error
+                );
+            } else {
+                maybe_autosave_restore_state(&mut state, autosave_interval_ms).await;
+            }
+        }
+    });
+    true
 }
 
 async fn handle_connection<S>(
@@ -814,6 +818,24 @@ mod tests {
             &direct
         ));
         assert!(close_completed_response("confirm", &confirmed));
+    }
+
+    #[tokio::test]
+    async fn test_background_tick_skips_busy_state() {
+        let state = Arc::new(tokio::sync::Mutex::new(DaemonState::new()));
+        let held = state.lock().await;
+
+        for _ in 0..100 {
+            assert!(!spawn_background_tick_if_idle(state.clone(), 30_000));
+        }
+        // Skipped ticks must not leave tasks queued on the lock.
+        assert_eq!(Arc::strong_count(&state), 1);
+
+        drop(held);
+        assert!(spawn_background_tick_if_idle(state.clone(), 30_000));
+        let _ = tokio::time::timeout(Duration::from_secs(1), state.lock())
+            .await
+            .expect("background tick should release the state lock");
     }
 
     /// Guard against re-introducing `waitpid(-1)` in daemon code.
