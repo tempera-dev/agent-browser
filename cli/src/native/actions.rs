@@ -3233,6 +3233,22 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
     }
     attach_webmcp_availability(&mut resp, action, state).await;
 
+    // Taken after the final drain so the snapshot reflects this command's
+    // events. A pending dialog would block the snapshot; the warning below
+    // already reports it.
+    if cmd.get("snapshotAfter").and_then(Value::as_bool) == Some(true)
+        && resp.get("success").and_then(Value::as_bool) == Some(true)
+        && state.pending_dialog.is_none()
+    {
+        let snapshot_cmd = observation_snapshot_command(state);
+        let observation = handle_snapshot(&snapshot_cmd, state)
+            .await
+            .unwrap_or_else(|error| json!({ "error": error }));
+        if let Some(data) = resp.get_mut("data").and_then(Value::as_object_mut) {
+            data.insert("observation".to_string(), observation);
+        }
+    }
+
     // Auto-report pending JavaScript dialog so agents know why commands may hang
     if action != "dialog" {
         if let Some(ref dialog) = state.pending_dialog {
@@ -6007,6 +6023,34 @@ fn observe_screenshot(
         response["path"] = json!(path);
     }
     Ok(response)
+}
+
+/// Delta snapshot for `--snapshot-after-action`. Continues the active tab's
+/// `snapshot --delta` history with the same options, or starts one with `-i -c`.
+fn observation_snapshot_command(state: &DaemonState) -> Value {
+    let previous = state
+        .browser
+        .as_ref()
+        .and_then(|mgr| mgr.active_session_id().ok())
+        .and_then(|session_id| state.snapshot_revisions.get(session_id))
+        .and_then(|entry| serde_json::from_str::<Value>(&entry.options).ok());
+    match previous {
+        Some(options) => json!({
+            "action": "snapshot",
+            "delta": true,
+            "selector": options["selector"],
+            "interactive": options["interactive"],
+            "compact": options["compact"],
+            "maxDepth": options["depth"],
+            "urls": options["urls"],
+        }),
+        None => json!({
+            "action": "snapshot",
+            "delta": true,
+            "interactive": true,
+            "compact": true,
+        }),
+    }
 }
 
 async fn handle_screenshot(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {

@@ -288,6 +288,8 @@ agent-browser snapshot --delta --full
 
 `snapshot --delta` returns `full`, `unchanged`, or incremental updates per tab and option set. URL changes or large deltas return full state; `--full` resets the baseline. Apply a delta’s `changes` to ref metadata and `treeChange` to the previous tree: split on newlines, replace `deleteCount` lines at zero-based `startLine` with `lines`, then rejoin. Apply both to `baseRevision` before advancing to `revision`.
 
+Add `--snapshot-after-action` to a page-changing command such as `click`, `fill`, or `open` to get a snapshot delta in its result (`data.observation` in JSON). It continues the tab's `--delta` history with the same options, or starts one with `-i -c`. Set `snapshotAfterAction` in config or `AGENT_BROWSER_SNAPSHOT_AFTER_ACTION=1` to enable it for every command. MCP action tools accept `snapshotAfter: true`.
+
 ### Iframe support
 
 Iframes are detected automatically during snapshots. `Iframe` nodes are resolved and their content is inlined beneath the iframe element in the snapshot output. Refs assigned to elements inside iframes carry frame context, so `click`, `fill`, and other interactions work without manually switching frames.
@@ -631,6 +633,7 @@ See [Init Scripts & Extensions](/init-scripts) for launch-time scripts, runtime 
 --color-scheme <scheme>  # Color scheme: dark, light, no-preference
 --download-path <path>   # Default download directory
 --content-boundaries     # Wrap page output in boundary markers for LLM safety
+--snapshot-after-action  # Append a snapshot delta to page-changing commands
 --max-output <chars>     # Truncate page output to N characters
 --allowed-domains <list> # Allowed domains; rejects restore/state replay, profile/session startup args, and direct-page providers
 --action-policy <path>   # Path to action policy JSON file

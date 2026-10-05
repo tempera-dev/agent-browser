@@ -1476,6 +1476,52 @@ async fn e2e_snapshot_refs_invalidate_iframe_navigation() {
     assert_success(&execute_command(&json!({"action": "close"}), &mut state).await);
 }
 
+#[tokio::test]
+#[ignore]
+async fn e2e_snapshot_after_action_returns_snapshot_delta() {
+    let mut state = DaemonState::new();
+    let buttons = (0..40)
+        .map(|i| format!("<button>Item {i}</button>"))
+        .collect::<String>();
+    let html = format!(
+        r#"<button id="add" onclick="const b=document.createElement('button');b.textContent='New';document.body.appendChild(b)">Add</button>{buttons}"#
+    );
+    let url = format!("data:text/html;base64,{}", STANDARD.encode(html));
+    for cmd in [
+        json!({ "id": "1", "action": "launch", "headless": true }),
+        json!({ "id": "2", "action": "navigate", "url": url }),
+    ] {
+        assert_success(&execute_command(&cmd, &mut state).await);
+    }
+    let click = json!({ "id": "3", "action": "click", "selector": "#add", "snapshotAfter": true });
+
+    // Without delta history the first observation is a full snapshot.
+    let resp = execute_command(&click, &mut state).await;
+    assert_success(&resp);
+    let observation = &get_data(&resp)["observation"]["snapshot"];
+    assert_eq!(observation["kind"], "full");
+    assert!(observation["tree"].as_str().unwrap().contains("\"New\""));
+
+    // Later observations continue the tab's `snapshot --delta` history and
+    // reuse its options.
+    let resp = execute_command(
+        &json!({ "id": "4", "action": "snapshot", "interactive": true, "delta": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let revision = get_data(&resp)["snapshot"]["revision"].clone();
+
+    let resp = execute_command(&click, &mut state).await;
+    assert_success(&resp);
+    let observation = &get_data(&resp)["observation"]["snapshot"];
+    assert_eq!(observation["kind"], "delta", "{observation}");
+    assert_eq!(observation["baseRevision"], revision);
+    assert!(observation["treeChange"].to_string().contains("New"));
+
+    assert_success(&execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await);
+}
+
 // ---------------------------------------------------------------------------
 // Screenshot
 // ---------------------------------------------------------------------------

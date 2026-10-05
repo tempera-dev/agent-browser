@@ -340,6 +340,9 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
                 result["timeout"] = json!(t);
             }
         }
+        if flags.snapshot_after_action && supports_snapshot_after(&result) {
+            result["snapshotAfter"] = json!(true);
+        }
     }
     attach_ca_cert_to_launch_command(&mut result, flags);
 
@@ -355,6 +358,26 @@ pub fn attach_ca_cert_to_launch_command(cmd: &mut Value, flags: &Flags) {
     }
     if flags.clear_ca_cert {
         cmd["clearCaCert"] = json!(true);
+    }
+}
+
+/// Commands that can change the page, and so honor `--snapshot-after-action`.
+fn supports_snapshot_after(cmd: &Value) -> bool {
+    let field = |key: &str| cmd.get(key).and_then(Value::as_str);
+    match field("action").unwrap_or_default() {
+        "dialog" => field("response") != Some("status"),
+        "clipboard" => field("operation") == Some("paste"),
+        "getbyrole" | "getbytext" | "getbylabel" | "getbyplaceholder" | "getbyalttext"
+        | "getbytitle" | "getbytestid" | "nth" => field("subaction") != Some("text"),
+        "navigate" | "evaluate" | "back" | "forward" | "reload" | "click" | "dblclick" | "fill"
+        | "type" | "press" | "keydown" | "keyup" | "keyboard" | "hover" | "focus" | "check"
+        | "uncheck" | "select" | "drag" | "upload" | "scroll" | "wheel" | "mousemove"
+        | "mousedown" | "mouseup" | "scrollintoview" | "wait" | "waitforurl"
+        | "waitforloadstate" | "waitforfunction" | "setcontent" | "setvalue" | "dispatch"
+        | "viewport" | "device" | "geolocation" | "permissions" | "emulatemedia" | "offline"
+        | "pushstate" | "addscript" | "addstyle" | "tap" | "swipe" | "tab_new" | "tab_switch"
+        | "tab_close" | "window_new" | "frame" | "mainframe" => true,
+        _ => false,
     }
 }
 
@@ -3640,6 +3663,7 @@ mod tests {
             color_scheme: None,
             download_path: None,
             content_boundaries: false,
+            snapshot_after_action: false,
             max_output: None,
             allowed_domains: None,
             action_policy: None,
@@ -5742,6 +5766,36 @@ mod tests {
         let mut f = default_flags();
         f.default_timeout = Some(ms);
         f
+    }
+
+    #[test]
+    fn test_snapshot_after_action_only_marks_page_changing_commands() {
+        let mut flags = default_flags();
+        flags.snapshot_after_action = true;
+
+        for cmd in [
+            "click @e1",
+            "open example.com",
+            "eval 1",
+            "tab new",
+            "find role button click",
+            "dialog accept",
+            "clipboard paste",
+        ] {
+            let parsed = parse_command(&args(cmd), &flags).unwrap();
+            assert_eq!(parsed["snapshotAfter"], true, "{cmd}");
+        }
+        for cmd in [
+            "snapshot -i",
+            "get title",
+            "dialog status",
+            "find role button text",
+            "clipboard read",
+            "close",
+        ] {
+            let parsed = parse_command(&args(cmd), &flags).unwrap();
+            assert!(parsed.get("snapshotAfter").is_none(), "{cmd}");
+        }
     }
 
     #[test]

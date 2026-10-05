@@ -1009,6 +1009,8 @@ agent-browser snapshot --delta --full      # Force full state and refresh the ba
 
 `--delta` returns `full`, `unchanged`, or incremental updates per tab and option set. It falls back to full state after URL changes or when a delta would not save space. See the [delta response format](skill-data/core/references/commands.md#snapshot-page-analysis) for applying updates.
 
+Add `--snapshot-after-action` to a page-changing command such as `click`, `fill`, or `open` to get a snapshot delta in its result (`data.observation` in JSON). It continues the tab's `--delta` history with the same options, or starts one with `-i -c`. Set `snapshotAfterAction` in config or `AGENT_BROWSER_SNAPSHOT_AFTER_ACTION=1` to enable it for every command. MCP action tools accept `snapshotAfter: true`.
+
 ## Annotated Screenshots
 
 The `--annotate` flag overlays numbered labels on interactive elements in the screenshot. Each label `[N]` corresponds to ref `@eN`, so the same refs work for both visual and text-based workflows.
@@ -1079,6 +1081,7 @@ This is useful for multimodal AI models that can reason about visual layout, unl
 | `--color-scheme <scheme>` | Color scheme: `dark`, `light`, `no-preference` (or `AGENT_BROWSER_COLOR_SCHEME` env) |
 | `--download-path <path>` | Default download directory (or `AGENT_BROWSER_DOWNLOAD_PATH` env) |
 | `--content-boundaries` | Wrap page output in boundary markers for LLM safety (or `AGENT_BROWSER_CONTENT_BOUNDARIES` env) |
+| `--snapshot-after-action` | Append a snapshot delta to page-changing commands (or `AGENT_BROWSER_SNAPSHOT_AFTER_ACTION` env) |
 | `--max-output <chars>` | Truncate page output to N characters (or `AGENT_BROWSER_MAX_OUTPUT` env) |
 | `--allowed-domains <list>` | Comma-separated allowed domain patterns; also disables WebRTC peer connections in supported Chromium sessions and rejects CDP, auto-connect, Chrome profiles, restore/state replay, direct-page provider plugins, unsafe startup `--args`, iOS, and Safari (or `AGENT_BROWSER_ALLOWED_DOMAINS` env) |
 | `--action-policy <path>` | Path to action policy JSON file (or `AGENT_BROWSER_ACTION_POLICY` env) |

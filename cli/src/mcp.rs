@@ -2054,6 +2054,16 @@ fn tool(name: &str, title: &str, description: &str, properties: Value, required:
             "description": "Maximum time to wait for this tool call."
         }),
     );
+    if supports_snapshot_after_tool(name) {
+        props.insert(
+            "snapshotAfter".to_string(),
+            json!({
+                "type": "boolean",
+                "default": false,
+                "description": "Append a snapshot delta of the page after the action."
+            }),
+        );
+    }
 
     let mut schema = serde_json::Map::new();
     schema.insert("type".to_string(), json!("object"));
@@ -2070,6 +2080,63 @@ fn tool(name: &str, title: &str, description: &str, properties: Value, required:
         "inputSchema": Value::Object(schema),
         "annotations": tool_annotations(name),
     })
+}
+
+fn supports_snapshot_after_tool(name: &str) -> bool {
+    matches!(
+        name,
+        TOOL_OPEN
+            | TOOL_EVAL
+            | TOOL_CLICK
+            | TOOL_BACK
+            | TOOL_FORWARD
+            | TOOL_RELOAD
+            | TOOL_DBLCLICK
+            | TOOL_FILL
+            | TOOL_TYPE
+            | TOOL_PRESS
+            | TOOL_KEYDOWN
+            | TOOL_KEYUP
+            | TOOL_KEYBOARD_TYPE
+            | TOOL_KEYBOARD_INSERT_TEXT
+            | TOOL_HOVER
+            | TOOL_FOCUS
+            | TOOL_CHECK
+            | TOOL_UNCHECK
+            | TOOL_SELECT
+            | TOOL_DRAG
+            | TOOL_UPLOAD
+            | TOOL_SCROLL
+            | TOOL_SCROLL_INTO_VIEW
+            | TOOL_MOUSE_MOVE
+            | TOOL_MOUSE_DOWN
+            | TOOL_MOUSE_UP
+            | TOOL_MOUSE_WHEEL
+            | TOOL_SET_VIEWPORT
+            | TOOL_SET_DEVICE
+            | TOOL_SET_GEO
+            | TOOL_SET_OFFLINE
+            | TOOL_SET_MEDIA
+            | TOOL_WAIT_MS
+            | TOOL_WAIT_FOR_SELECTOR
+            | TOOL_WAIT_FOR_TEXT
+            | TOOL_WAIT_FOR_URL
+            | TOOL_WAIT_FOR_LOAD
+            | TOOL_WAIT_FOR_FUNCTION
+            | TOOL_DIALOG_ACCEPT
+            | TOOL_DIALOG_DISMISS
+            | TOOL_TAB_NEW
+            | TOOL_TAB_SWITCH
+            | TOOL_TAB_CLOSE
+            | TOOL_WINDOW_NEW
+            | TOOL_FRAME_SWITCH
+            | TOOL_FRAME_MAIN
+            | TOOL_PUSHSTATE
+            | TOOL_CLIPBOARD_PASTE
+            | TOOL_TAP
+            | TOOL_SWIPE
+            | TOOL_FIND
+    )
 }
 
 fn tool_annotations(name: &str) -> Value {
@@ -3878,6 +3945,10 @@ fn append_common_global_args(
     } else if clear_ca_cert {
         args.push("--no-ca-cert".to_string());
     }
+    if let Some(enabled) = optional_bool(arguments, "snapshotAfter")? {
+        args.push("--snapshot-after-action".to_string());
+        args.push(enabled.to_string());
+    }
 
     Ok(())
 }
@@ -4023,11 +4094,9 @@ fn tool_text(parsed: Option<&Value>, stdout: &str, stderr: &str) -> String {
                     })
                     .collect()
             } else {
-                primary
-                    .get_mut("data")
-                    .and_then(take_webmcp_context)
-                    .into_iter()
-                    .collect()
+                let observation = primary.get_mut("data").and_then(take_observation);
+                let webmcp = primary.get_mut("data").and_then(take_webmcp_context);
+                observation.into_iter().chain(webmcp).collect()
             };
             let mut text = response_text(&primary).unwrap_or_else(|| {
                 serde_json::to_string_pretty(&primary).unwrap_or_else(|_| stdout.trim().to_string())
@@ -4056,6 +4125,12 @@ fn tool_text(parsed: Option<&Value>, stdout: &str, stderr: &str) -> String {
     } else {
         text
     }
+}
+
+fn take_observation(data: &mut Value) -> Option<String> {
+    let text = crate::output::format_observation(data, &Default::default());
+    data.as_object_mut()?.remove("observation");
+    text
 }
 
 fn take_webmcp_context(data: &mut Value) -> Option<String> {
@@ -4270,6 +4345,21 @@ mod tests {
         assert!(names.contains(&TOOL_SESSION_INFO));
         assert!(!names.contains(&"agent_browser_frame_list"));
         assert!(names.iter().all(|name| name.starts_with("agent_browser_")));
+    }
+
+    #[test]
+    fn snapshot_after_is_only_exposed_on_page_changing_tools() {
+        let tools = tools();
+        let has_option = |name: &str| {
+            tools.iter().find(|tool| tool["name"] == name).unwrap()["inputSchema"]["properties"]
+                .get("snapshotAfter")
+                .is_some()
+        };
+        for name in [TOOL_CLICK, TOOL_EVAL, TOOL_TAB_SWITCH, TOOL_FIND] {
+            assert!(has_option(name), "{name}");
+        }
+        assert!(!has_option(TOOL_SNAPSHOT));
+        assert!(!has_option(TOOL_GET_TITLE));
     }
 
     #[test]
@@ -4639,6 +4729,27 @@ mod tests {
     }
 
     #[test]
+    fn tool_result_appends_observation_to_action_text() {
+        let response = json!({"success": true, "data": {
+            "url": "https://example.com/next",
+            "observation": {
+                "snapshot": {"kind": "unchanged", "baseRevision": 1, "revision": 2},
+                "origin": "https://example.com/next"
+            }
+        }});
+        let result = tool_result_from_run(CliRun {
+            exit_code: Some(0),
+            stdout: response.to_string(),
+            stderr: String::new(),
+        });
+        assert_eq!(
+            result["content"][0]["text"],
+            "https://example.com/next\n\nSnapshot after action:\nunchanged (revision 2)"
+        );
+        assert_eq!(result["structuredContent"]["response"], response);
+    }
+
+    #[test]
     fn click_command_args_include_new_tab() {
         let args = click_command_args(&json!({
             "selector": "@e1",
@@ -4805,6 +4916,15 @@ mod tests {
 
         assert!(error.message.contains("Cannot use caCert with clearCaCert"));
         assert!(args.is_empty());
+    }
+
+    #[test]
+    fn common_global_args_forward_snapshot_after_explicitly() {
+        let mut args = Vec::new();
+
+        append_common_global_args(&mut args, &json!({ "snapshotAfter": true }), None).unwrap();
+
+        assert_eq!(args, vec!["--snapshot-after-action", "true"]);
     }
 
     #[test]

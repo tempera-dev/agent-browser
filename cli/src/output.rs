@@ -93,6 +93,42 @@ fn format_snapshot_delta(
     format_with_boundaries(&content, origin, opts)
 }
 
+fn format_snapshot_revision(
+    snapshot: &serde_json::Map<String, serde_json::Value>,
+    origin: Option<&str>,
+    opts: &OutputOptions,
+) -> String {
+    match snapshot.get("kind").and_then(|v| v.as_str()) {
+        Some("full") => {
+            let tree = snapshot.get("tree").and_then(|v| v.as_str());
+            format_with_boundaries(tree.unwrap_or_default(), origin, opts)
+        }
+        Some("unchanged") => format!(
+            "unchanged (revision {})",
+            snapshot
+                .get("revision")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0)
+        ),
+        Some("delta") => format_snapshot_delta(snapshot, origin, opts),
+        _ => serde_json::Value::Object(snapshot.clone()).to_string(),
+    }
+}
+
+/// Text for the `data.observation` snapshot added by `--snapshot-after-action`.
+pub(crate) fn format_observation(data: &serde_json::Value, opts: &OutputOptions) -> Option<String> {
+    let observation = data.get("observation")?;
+    if let Some(error) = observation.get("error").and_then(|v| v.as_str()) {
+        return Some(format!("Snapshot after action failed: {}", error));
+    }
+    let snapshot = observation.get("snapshot")?.as_object()?;
+    let origin = observation.get("origin").and_then(|v| v.as_str());
+    Some(format!(
+        "Snapshot after action:\n{}",
+        format_snapshot_revision(snapshot, origin, opts)
+    ))
+}
+
 fn boundary_origin(data: &serde_json::Value) -> Option<&str> {
     for key in ["origin", "finalUrl", "url"] {
         if let Some(value) = data.get(key).and_then(|v| v.as_str()) {
@@ -494,6 +530,13 @@ fn recording_fps_suffix(data: &serde_json::Value) -> String {
 pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &OutputOptions) {
     print_primary_response(resp, action, opts);
     if !opts.json {
+        if let Some(observation) = resp
+            .data
+            .as_ref()
+            .and_then(|data| format_observation(data, opts))
+        {
+            println!("{observation}");
+        }
         if let Some(context) = resp
             .data
             .as_ref()
@@ -687,21 +730,10 @@ fn print_primary_response(resp: &Response, action: Option<&str>, opts: &OutputOp
             return;
         }
         if let Some(snapshot) = data.get("snapshot").and_then(|v| v.as_object()) {
-            match snapshot.get("kind").and_then(|v| v.as_str()) {
-                Some("full") => {
-                    if let Some(tree) = snapshot.get("tree").and_then(|v| v.as_str()) {
-                        print_with_boundaries(tree, origin, opts);
-                    }
-                }
-                Some("unchanged") => println!(
-                    "unchanged (revision {})",
-                    snapshot
-                        .get("revision")
-                        .and_then(|v| v.as_u64())
-                        .unwrap_or(0)
-                ),
-                Some("delta") => println!("{}", format_snapshot_delta(snapshot, origin, opts)),
-                _ => println!("{}", serde_json::Value::Object(snapshot.clone())),
+            let content = format_snapshot_revision(snapshot, origin, opts);
+            print!("{}", content);
+            if !content.ends_with('\n') {
+                println!();
             }
             return;
         }
@@ -4062,6 +4094,7 @@ Options:
   --color-scheme <scheme>    Color scheme: dark, light, no-preference (or AGENT_BROWSER_COLOR_SCHEME)
   --download-path <path>     Default download directory (or AGENT_BROWSER_DOWNLOAD_PATH)
   --content-boundaries       Wrap page output in boundary markers (or AGENT_BROWSER_CONTENT_BOUNDARIES)
+  --snapshot-after-action    Append a snapshot delta to page-changing commands (or AGENT_BROWSER_SNAPSHOT_AFTER_ACTION)
   --max-output <chars>       Truncate page output to N chars (or AGENT_BROWSER_MAX_OUTPUT)
   --allowed-domains <list>   Restrict network domains; rejects CDP, auto-connect, profiles, restore/state replay, direct-page providers, unsafe startup args, iOS/Safari (or AGENT_BROWSER_ALLOWED_DOMAINS)
   --action-policy <path>     Action policy JSON file (or AGENT_BROWSER_ACTION_POLICY)
@@ -4161,6 +4194,7 @@ Environment:
   AGENT_BROWSER_IOS_DEVICE       Default iOS device name
   AGENT_BROWSER_IOS_UDID         Default iOS device UDID
   AGENT_BROWSER_CONTENT_BOUNDARIES Wrap page output in boundary markers
+  AGENT_BROWSER_SNAPSHOT_AFTER_ACTION Append a snapshot delta to page-changing commands
   AGENT_BROWSER_MAX_OUTPUT       Max characters for page output
   AGENT_BROWSER_ALLOWED_DOMAINS  Comma-separated allowed domain patterns; requires a fresh controllable browser context without profile/session startup args, restore/state replay, or direct-page provider plugins
   AGENT_BROWSER_ACTION_POLICY    Path to action policy JSON file
@@ -4311,9 +4345,9 @@ pub fn print_version() {
 #[cfg(test)]
 mod tests {
     use super::{
-        boundary_origin, format_a11y_text, format_snapshot_delta, format_storage_text,
-        format_vitals_text, format_webmcp_context, format_webmcp_text, format_webmcp_tool_text,
-        format_with_boundaries, OutputOptions,
+        boundary_origin, format_a11y_text, format_observation, format_snapshot_delta,
+        format_storage_text, format_vitals_text, format_webmcp_context, format_webmcp_text,
+        format_webmcp_tool_text, format_with_boundaries, OutputOptions,
     };
     use serde_json::json;
 
@@ -4574,6 +4608,25 @@ hydration: -  phases: 0  hydratedComponents: 0"
         );
         assert!(truncated.contains("[truncated: showing 32 of"));
         assert!(!truncated.contains("ignore previous instructions"));
+    }
+
+    #[test]
+    fn test_format_observation() {
+        let opts = OutputOptions::default();
+        let full = json!({"observation": {
+            "snapshot": {"kind": "full", "revision": 1, "tree": "- button \"New\" [ref=e1]"},
+            "origin": "https://example.com"
+        }});
+        assert_eq!(
+            format_observation(&full, &opts).unwrap(),
+            "Snapshot after action:\n- button \"New\" [ref=e1]"
+        );
+        let failed = json!({"observation": {"error": "Browser not launched"}});
+        assert_eq!(
+            format_observation(&failed, &opts).unwrap(),
+            "Snapshot after action failed: Browser not launched"
+        );
+        assert!(format_observation(&json!({"clicked": true}), &opts).is_none());
     }
 
     #[test]

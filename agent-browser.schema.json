@@ -165,6 +165,10 @@
       "type": "boolean",
       "description": "Wrap page output in boundary markers for LLM safety."
     },
+    "snapshotAfterAction": {
+      "type": "boolean",
+      "description": "Append a snapshot delta to the result of page-changing commands."
+    },
     "maxOutput": {
       "type": "integer",
       "minimum": 0,

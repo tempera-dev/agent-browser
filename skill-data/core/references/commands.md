@@ -54,6 +54,8 @@ agent-browser snapshot --delta --full # Force full state and refresh baseline
 
 Delta history is per tab and option set. Responses are `full`, `unchanged`, or `delta`; URL changes or large deltas return full state. For a delta, apply `changes` (`add`, `remove`, `replace`) to ref metadata. Split the previous tree on newlines, splice `treeChange.lines` at zero-based `startLine`, replacing `deleteCount` lines, then join with newlines. Apply both parts to `baseRevision` before advancing to `revision`; use `--full` if the baseline is unavailable.
 
+Add `--snapshot-after-action` to a page-changing command (`click`, `fill`, `open`, `wait`, ...) to return the next delta in `data.observation`. It continues the tab's delta history with the same options, or starts one with `-i -c`. In MCP, pass `snapshotAfter: true`.
+
 ## Interactions (use @refs from snapshot)
 
 ```bash

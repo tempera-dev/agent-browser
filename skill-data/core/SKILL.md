@@ -100,7 +100,7 @@ agent-browser snapshot -i --delta         # full state once, then compact change
 agent-browser snapshot -i --delta --full  # force full state and refresh baseline
 ```
 
-Use `--delta` to reduce repeated output and `--full` to reset the baseline.
+Use `--delta` to reduce repeated output and `--full` to reset the baseline. Add `--snapshot-after-action` to a click, fill, or other page-changing command to get the delta in the same response instead of taking another snapshot.
 
 Snapshot output looks like:
 
