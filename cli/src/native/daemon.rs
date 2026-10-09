@@ -979,6 +979,7 @@ mod tests {
         )
         .await;
         assert_eq!(bailed["data"]["results"].as_array().unwrap().len(), 1);
+        assert_eq!(bailed["data"]["closed"], false);
     }
 
     #[tokio::test]
@@ -1008,6 +1009,7 @@ mod tests {
             "Nested batch commands are not supported"
         );
         assert_eq!(results[1]["result"]["confirmation_required"], true);
+        assert_eq!(response["data"]["closed"], false);
     }
 
     #[tokio::test]

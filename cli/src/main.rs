@@ -2281,6 +2281,16 @@ fn run_batch(
         exit(1);
     };
 
+    if response
+        .data
+        .as_ref()
+        .and_then(|data| data.get("closed"))
+        .and_then(|closed| closed.as_bool())
+        == Some(true)
+    {
+        tls::clear_session(&flags.session);
+    }
+
     if flags.json {
         println!(
             "{}",
@@ -2324,12 +2334,8 @@ fn batch_entries(commands: &[Vec<String>], flags: &Flags) -> Vec<serde_json::Val
         .map(|cmd_args| match parse_command(cmd_args, flags) {
             Ok(mut parsed) => {
                 attach_input_mode(&mut parsed, flags);
-                match parsed.get("action").and_then(|v| v.as_str()) {
-                    Some("read") => {
-                        parsed["tls"] = json!(tls::session_options(flags, &flags.session))
-                    }
-                    Some("close") => tls::clear_session(&flags.session),
-                    _ => {}
+                if parsed.get("action").and_then(|v| v.as_str()) == Some("read") {
+                    parsed["tls"] = json!(tls::session_options(flags, &flags.session));
                 }
                 attach_plugins_to_command(&mut parsed, &flags.plugins);
                 attach_restore_config_to_command(&mut parsed, flags);
@@ -2797,6 +2803,37 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("Unknown command"));
+    }
+
+    #[test]
+    fn test_preparing_batch_close_preserves_saved_trust() {
+        let guard = crate::test_utils::EnvGuard::new(&[
+            "AGENT_BROWSER_SOCKET_DIR",
+            "AGENT_BROWSER_NAMESPACE",
+        ]);
+        let directory = tempfile::tempdir().unwrap();
+        guard.set(
+            "AGENT_BROWSER_SOCKET_DIR",
+            directory.path().to_str().unwrap(),
+        );
+        guard.remove("AGENT_BROWSER_NAMESPACE");
+        let mut flags = neutral_launch_config_flags();
+        flags.session = "batch-trust-regression".to_string();
+        let trust_path = directory.path().join("batch-trust-regression.trust.json");
+        std::fs::write(&trust_path, r#"{"useSystemCa":true}"#).unwrap();
+        // With --bail, the close below may never execute. Preparing it also
+        // must not change the trust attached to a later read request.
+        let entries = batch_entries(
+            &[
+                vec!["definitely-not-a-command".to_string()],
+                vec!["close".to_string()],
+                vec!["read".to_string(), "https://example.com".to_string()],
+            ],
+            &flags,
+        );
+        assert!(entries[0]["parseError"].is_string());
+        assert!(trust_path.exists(), "the session has not actually closed");
+        assert_eq!(entries[2]["request"]["tls"]["useSystemCa"], true);
     }
 
     #[test]
